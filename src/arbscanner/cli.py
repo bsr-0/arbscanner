@@ -175,6 +175,114 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
             console.print(f"  {k}: {v}")
 
 
+def cmd_paper_trade(args: argparse.Namespace) -> None:
+    """Paper trading: open/close/resolve positions and inspect the account."""
+    from arbscanner.db import get_connection, get_opportunity_by_id
+    from arbscanner.paper_trading import PaperTradingEngine
+
+    engine = PaperTradingEngine()
+
+    if args.action == "summary":
+        s = engine.summary()
+        console.print("[bold]Paper trading account[/bold]")
+        console.print(f"  Balance:          ${s['balance']:.2f}")
+        console.print(f"  Total PnL:        ${s['total_pnl']:+.2f}")
+        console.print(f"  Open positions:   {s['open_positions']}")
+        console.print(f"  Total trades:     {s['total_trades']}")
+        console.print(f"  Win rate:         {s['win_rate']:.1%}")
+        console.print(f"  Avg PnL / trade:  ${s['avg_pnl_per_trade']:+.2f}")
+        return
+
+    if args.action == "list":
+        account = engine.get_account()
+        positions = account.positions
+        if not args.all:
+            positions = [p for p in positions if p.status == "open"]
+        if not positions:
+            console.print("[yellow]No positions found.[/yellow]")
+            return
+        console.print(f"[bold]{len(positions)} positions[/bold]")
+        for p in positions:
+            realized = (
+                f"pnl=${p.realized_pnl:+.2f}" if p.realized_pnl is not None else "open"
+            )
+            console.print(
+                f"  #{p.id} [{p.status}] {p.direction} size={p.size:.0f} "
+                f"entry=({p.entry_poly_price:.3f}, {p.entry_kalshi_price:.3f}) "
+                f"expected=${p.expected_profit:+.2f} {realized}"
+            )
+        return
+
+    if args.action == "open":
+        if args.opportunity_id is None:
+            console.print("[red]--opportunity-id is required for 'open'[/red]")
+            sys.exit(1)
+        conn = get_connection()
+        try:
+            opp = get_opportunity_by_id(conn, args.opportunity_id)
+        finally:
+            conn.close()
+        if opp is None:
+            console.print(
+                f"[red]No opportunity with id={args.opportunity_id}[/red]"
+            )
+            sys.exit(1)
+        try:
+            position = engine.open_position(
+                opp, size=args.size, opportunity_id=args.opportunity_id
+            )
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+        console.print(
+            f"[green]Opened position #{position.id} "
+            f"size={position.size:.2f} expected=${position.expected_profit:+.2f}[/green]"
+        )
+        return
+
+    if args.action == "close":
+        if args.position_id is None or args.poly_price is None or args.kalshi_price is None:
+            console.print(
+                "[red]'close' requires --position-id, --poly-price, and --kalshi-price[/red]"
+            )
+            sys.exit(1)
+        try:
+            realized = engine.close_position(
+                args.position_id, args.poly_price, args.kalshi_price
+            )
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+        console.print(
+            f"[green]Closed position #{args.position_id} "
+            f"realized PnL=${realized:+.2f}[/green]"
+        )
+        return
+
+    if args.action == "resolve":
+        if args.position_id is None:
+            console.print("[red]--position-id is required for 'resolve'[/red]")
+            sys.exit(1)
+        if args.yes and args.no:
+            console.print("[red]Use exactly one of --yes or --no[/red]")
+            sys.exit(1)
+        if not args.yes and not args.no:
+            console.print("[red]Must supply --yes or --no[/red]")
+            sys.exit(1)
+        try:
+            realized = engine.close_resolved_position(
+                args.position_id, yes_won=args.yes
+            )
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+        console.print(
+            f"[green]Resolved position #{args.position_id} "
+            f"(yes_won={args.yes}) realized PnL=${realized:+.2f}[/green]"
+        )
+        return
+
+
 def cmd_backup(args: argparse.Namespace) -> None:
     """Backup, restore, list, or prune the SQLite database."""
     from pathlib import Path
@@ -281,6 +389,28 @@ def main() -> None:
         help="Max resolved markets to fetch per exchange (for --ingest-live)",
     )
 
+    # paper-trade command
+    paper_parser = subparsers.add_parser(
+        "paper-trade", help="Paper trading: open, close, resolve, list, summary"
+    )
+    paper_parser.add_argument(
+        "action",
+        choices=["open", "close", "resolve", "list", "summary"],
+        help="Paper trading action",
+    )
+    paper_parser.add_argument(
+        "--opportunity-id", type=int, help="Logged opportunity id (for open)"
+    )
+    paper_parser.add_argument(
+        "--position-id", type=int, help="Paper position id (for close/resolve)"
+    )
+    paper_parser.add_argument("--size", type=float, help="Contracts to buy (default: full available_size)")
+    paper_parser.add_argument("--poly-price", type=float, help="Exit poly price (for close)")
+    paper_parser.add_argument("--kalshi-price", type=float, help="Exit kalshi price (for close)")
+    paper_parser.add_argument("--yes", action="store_true", help="Resolve YES (for resolve)")
+    paper_parser.add_argument("--no", action="store_true", help="Resolve NO (for resolve)")
+    paper_parser.add_argument("--all", action="store_true", help="Include closed positions (for list)")
+
     # backup command
     backup_parser = subparsers.add_parser(
         "backup", help="Database backup, restore, list, prune"
@@ -313,6 +443,7 @@ def main() -> None:
         "serve": cmd_serve,
         "calibrate": cmd_calibrate,
         "backup": cmd_backup,
+        "paper-trade": cmd_paper_trade,
     }
     commands[args.command](args)
 
