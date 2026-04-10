@@ -23,12 +23,20 @@ CREATE TABLE IF NOT EXISTS opportunities (
 );
 """
 
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_opportunities_timestamp ON opportunities(timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_opportunities_net_edge ON opportunities(net_edge)",
+    "CREATE INDEX IF NOT EXISTS idx_opportunities_profit ON opportunities(expected_profit)",
+]
+
 
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
-    """Get a SQLite connection, creating the schema if needed."""
+    """Get a SQLite connection, creating the schema and indexes if needed."""
     path = db_path or DB_PATH
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.execute(SCHEMA)
+    for index_sql in INDEXES:
+        conn.execute(index_sql)
     conn.commit()
     return conn
 

@@ -9,7 +9,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pandas as pd
 
 from arbscanner.config import CALIBRATION_DATA_DIR, DB_PATH
@@ -228,6 +230,123 @@ def compute_calibration_curves(data_path: Path) -> pd.DataFrame:
     logger.info("Saved calibration curves to %s (%d rows)", output_path, len(curves))
 
     return curves
+
+
+REQUIRED_COLUMNS = {"category", "resolution_date", "created_date", "final_price", "resolved_yes"}
+
+
+def _validate_schema(df: pd.DataFrame) -> None:
+    """Ensure a historical dataset has the columns we need."""
+    missing = REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Historical dataset missing required columns: {sorted(missing)}. "
+            f"Expected: {sorted(REQUIRED_COLUMNS)}"
+        )
+
+
+def ingest_from_url(url: str, out_path: Path | None = None) -> int:
+    """Download a Parquet historical dataset from a URL.
+
+    Validates that the downloaded file has the expected schema and saves it
+    to the calibration data directory for `compute_calibration_curves` to
+    process.
+
+    Returns the number of rows in the downloaded dataset.
+    """
+    out_path = out_path or (CALIBRATION_DATA_DIR / "historical_raw.parquet")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Downloading historical dataset from %s", url)
+    with httpx.stream("GET", url, follow_redirects=True, timeout=120) as resp:
+        resp.raise_for_status()
+        with out_path.open("wb") as f:
+            for chunk in resp.iter_bytes():
+                f.write(chunk)
+
+    # Validate schema
+    df = pd.read_parquet(out_path)
+    _validate_schema(df)
+
+    logger.info("Downloaded %d rows to %s", len(df), out_path)
+    return len(df)
+
+
+def ingest_from_exchange(
+    exchange: Any,
+    exchange_name: str,
+    out_path: Path | None = None,
+    limit: int | None = None,
+) -> int:
+    """Build a historical dataset by scraping resolved markets from an exchange.
+
+    Walks paginated markets via pmxt, filters to closed/resolved binary markets,
+    and records one row per market suitable for `compute_calibration_curves`.
+
+    This is our fallback when no external dataset (e.g. Jon Becker's) is
+    available. It's lower-quality than a curated dataset because pmxt may not
+    expose the final price before close for every market, but it's a starting
+    point.
+
+    Returns the number of rows written.
+    """
+    out_path = out_path or (CALIBRATION_DATA_DIR / f"historical_{exchange_name.lower()}.parquet")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+    cursor = None
+    fetched = 0
+
+    while True:
+        params: dict[str, Any] = {"limit": 100, "status": "closed"}
+        if cursor:
+            params["cursor"] = cursor
+
+        try:
+            result = exchange.fetch_markets_paginated(**params)
+        except Exception:
+            logger.exception("Error fetching closed markets from %s", exchange_name)
+            break
+
+        for market in result.data:
+            if not (market.yes and market.no):
+                continue
+            # Only include markets that have resolved (status suggests closed)
+            if market.status not in ("closed", "resolved", "settled"):
+                continue
+            # Determine which side won: resolved YES if yes.price is ~1.0
+            resolved_yes = bool(market.yes.price and market.yes.price > 0.5)
+            rows.append({
+                "market_id": market.market_id,
+                "category": normalize_category(market.category),
+                "created_date": pd.NaT,  # pmxt may not expose this; caller can backfill
+                "resolution_date": market.resolution_date,
+                "final_price": market.yes.price if market.yes else None,
+                "resolved_yes": resolved_yes,
+                "title": market.title,
+                "exchange": exchange_name.lower(),
+            })
+            fetched += 1
+            if limit and fetched >= limit:
+                break
+
+        logger.info(
+            "Fetched %d closed markets from %s (total: %d)",
+            len(result.data),
+            exchange_name,
+            fetched,
+        )
+
+        if limit and fetched >= limit:
+            break
+        if not result.next_cursor:
+            break
+        cursor = result.next_cursor
+
+    df = pd.DataFrame(rows)
+    df.to_parquet(out_path)
+    logger.info("Saved %d resolved markets to %s", len(df), out_path)
+    return len(df)
 
 
 def get_historical_edge_stats(db_path: Path | None = None) -> dict:

@@ -5,7 +5,14 @@ from typing import Any
 
 import pmxt
 
+from arbscanner.config import settings
+from arbscanner.utils import RateLimiter, retry_with_backoff
+
 logger = logging.getLogger(__name__)
+
+# Shared rate limiter across all threads. Protects both exchanges from a burst
+# of concurrent requests when the ThreadPoolExecutor spins up in engine.scan_all_pairs.
+_rate_limiter = RateLimiter(calls_per_sec=settings.rate_limit_per_sec)
 
 
 def create_exchanges() -> tuple[Any, Any]:
@@ -13,6 +20,16 @@ def create_exchanges() -> tuple[Any, Any]:
     poly = pmxt.Polymarket()
     kalshi = pmxt.Kalshi()
     return poly, kalshi
+
+
+@retry_with_backoff(
+    max_attempts=settings.retry_attempts,
+    base_delay=settings.retry_base_delay,
+)
+def _fetch_markets_page(exchange: Any, params: dict[str, Any]) -> Any:
+    """Single paginated fetch call with retry."""
+    _rate_limiter.acquire()
+    return exchange.fetch_markets_paginated(**params)
 
 
 def fetch_all_markets(exchange: Any, exchange_name: str) -> list:
@@ -29,7 +46,7 @@ def fetch_all_markets(exchange: Any, exchange_name: str) -> list:
             params["cursor"] = cursor
 
         try:
-            result = exchange.fetch_markets_paginated(**params)
+            result = _fetch_markets_page(exchange, params)
         except Exception:
             logger.exception("Error fetching markets from %s", exchange_name)
             break
@@ -52,10 +69,24 @@ def fetch_all_markets(exchange: Any, exchange_name: str) -> list:
     return all_markets
 
 
+@retry_with_backoff(
+    max_attempts=settings.retry_attempts,
+    base_delay=settings.retry_base_delay,
+)
+def _fetch_order_book(exchange: Any, outcome_id: str) -> Any:
+    """Single order book fetch with retry and rate limiting."""
+    _rate_limiter.acquire()
+    return exchange.fetch_order_book(outcome_id)
+
+
 def fetch_order_book_safe(exchange: Any, outcome_id: str) -> Any | None:
-    """Fetch an order book, returning None on error."""
+    """Fetch an order book, returning None on error after retries exhausted.
+
+    Preserves the None-on-failure contract that engine.py expects, but adds
+    retry/backoff and rate limiting under the hood.
+    """
     try:
-        return exchange.fetch_order_book(outcome_id)
+        return _fetch_order_book(exchange, outcome_id)
     except Exception:
-        logger.debug("Failed to fetch order book for %s", outcome_id)
+        logger.debug("Failed to fetch order book for %s after retries", outcome_id)
         return None

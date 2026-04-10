@@ -4,11 +4,11 @@ import logging
 import sqlite3
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import stripe
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from arbscanner.calibration import get_calibration_context, get_historical_edge_stats
@@ -46,16 +46,20 @@ def get_opportunities(
 ):
     """Get recent arb opportunities from the database."""
     conn = app.state.db
+    # ISO 8601 strings sort lexicographically when timezone-normalized, so a
+    # direct string comparison is correct here.
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     query = """
         SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
                direction, gross_edge, net_edge, available_size,
                expected_profit, poly_price, kalshi_price
         FROM opportunities
         WHERE net_edge >= ?
+          AND timestamp >= ?
         ORDER BY expected_profit DESC
         LIMIT ?
     """
-    rows = conn.execute(query, (min_edge, limit)).fetchall()
+    rows = conn.execute(query, (min_edge, cutoff, limit)).fetchall()
     return [
         {
             "timestamp": row[0],

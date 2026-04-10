@@ -27,6 +27,12 @@ class Settings:
     llm_confirm_high: float = 0.9
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
 
+    # Data pipeline tuning
+    max_workers: int = 8  # ThreadPoolExecutor size for parallel scanning
+    rate_limit_per_sec: float = 10.0  # Shared pmxt call rate limit
+    retry_attempts: int = 3  # Retry count for transient exchange failures
+    retry_base_delay: float = 0.5  # Initial retry backoff in seconds
+
     # Alerts
     telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))

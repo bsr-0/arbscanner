@@ -1,12 +1,19 @@
 """Tests for the calibration layer."""
 
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+import pytest
 
 from arbscanner.calibration import (
     CalibrationContext,
+    compute_calibration_curves,
     days_to_bucket,
     get_calibration_context,
     normalize_category,
+    _validate_schema,
 )
 
 
@@ -76,3 +83,72 @@ def test_get_calibration_context_unknown_category():
     assert ctx.category == "other"
     # Should use fallback mispricing of 5.0
     assert ctx.avg_mispricing == 5.0
+
+
+def test_validate_schema_missing_columns():
+    """_validate_schema should raise on missing required columns."""
+    df = pd.DataFrame({"category": ["politics"], "final_price": [0.5]})
+    with pytest.raises(ValueError, match="missing required columns"):
+        _validate_schema(df)
+
+
+def test_validate_schema_all_present():
+    """_validate_schema should pass when all required columns exist."""
+    df = pd.DataFrame(
+        {
+            "category": ["politics"],
+            "resolution_date": [datetime(2026, 1, 1)],
+            "created_date": [datetime(2025, 12, 1)],
+            "final_price": [0.5],
+            "resolved_yes": [True],
+        }
+    )
+    _validate_schema(df)  # should not raise
+
+
+def test_compute_calibration_curves():
+    """Compute curves from a synthetic Parquet dataset and verify shape."""
+    df = pd.DataFrame(
+        {
+            "category": ["Politics", "Politics", "Sports", "Sports", "Entertainment"],
+            "created_date": [
+                datetime(2026, 1, 1),
+                datetime(2026, 3, 1),
+                datetime(2026, 1, 1),
+                datetime(2026, 3, 1),
+                datetime(2026, 1, 1),
+            ],
+            "resolution_date": [
+                datetime(2026, 1, 5),  # 4 days  → 0-7
+                datetime(2026, 3, 5),  # 4 days  → 0-7
+                datetime(2026, 2, 1),  # 31 days → 30-90
+                datetime(2026, 4, 1),  # 31 days → 30-90
+                datetime(2026, 7, 1),  # 181 days → 90+
+            ],
+            "final_price": [0.6, 0.4, 0.7, 0.3, 0.5],
+            "resolved_yes": [True, False, True, False, True],
+        }
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "historical.parquet"
+        df.to_parquet(path)
+
+        # Redirect the output path to the temp dir by monkey-patching the module constant
+        import arbscanner.calibration as cal_mod
+
+        original = cal_mod.CALIBRATION_DATA_DIR
+        cal_mod.CALIBRATION_DATA_DIR = Path(tmpdir) / "calibration"
+        try:
+            curves = compute_calibration_curves(path)
+        finally:
+            cal_mod.CALIBRATION_DATA_DIR = original
+
+        # Should have one row per (category, time_bucket) combo
+        assert len(curves) == 3
+        assert set(curves.columns) >= {"category", "time_bucket", "avg_mispricing", "count"}
+        # Politics 0-7 should have 2 entries
+        politics_row = curves[
+            (curves["category"] == "politics") & (curves["time_bucket"] == "0-7")
+        ].iloc[0]
+        assert politics_row["count"] == 2

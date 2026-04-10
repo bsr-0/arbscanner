@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from arbscanner.db import get_connection, log_opportunities
 from arbscanner.models import ArbOpportunity
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def _get_test_app():
@@ -32,7 +32,7 @@ def _make_opp(**kwargs) -> ArbOpportunity:
         net_edge=0.10,
         available_size=50,
         expected_profit=5.0,
-        timestamp=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        timestamp=datetime.now(timezone.utc),
     )
     defaults.update(kwargs)
     return ArbOpportunity(**defaults)
@@ -80,6 +80,45 @@ def test_get_opportunities_filtered():
         data = resp.json()
         assert len(data) == 1
         assert data[0]["net_edge"] == 0.05
+        conn.close()
+
+
+def test_get_opportunities_timestamp_filter():
+    """The `hours` query param should filter out old opportunities."""
+    app = _get_test_app()
+    now = datetime.now(timezone.utc)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = get_connection(db_path)
+        log_opportunities(
+            conn,
+            [
+                _make_opp(
+                    poly_title="Recent", timestamp=now - timedelta(minutes=30)
+                ),
+                _make_opp(
+                    poly_title="Old", timestamp=now - timedelta(hours=5)
+                ),
+            ],
+        )
+
+        app.state.db = conn
+        app.state.start_time = 0
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # 1 hour lookback should only return the recent one
+        resp = client.get("/api/opportunities?hours=1&min_edge=0")
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["market_title"] == "Recent"
+
+        # 6 hour lookback should return both
+        resp = client.get("/api/opportunities?hours=6&min_edge=0")
+        data = resp.json()
+        assert len(data) == 2
+
         conn.close()
 
 

@@ -22,7 +22,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
     interval = args.interval
     threshold = args.threshold
+    max_workers = args.max_workers
     settings.edge_threshold = threshold
+    settings.max_workers = max_workers
 
     console.print("[bold]Initializing exchanges...[/bold]")
     poly, kalshi = create_exchanges()
@@ -39,7 +41,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
         console.print("[red]No matched pairs found. Cannot scan.[/red]")
         sys.exit(1)
 
-    console.print(f"Loaded {len(cache.pairs)} matched pairs")
+    console.print(f"Loaded {len(cache.pairs)} matched pairs (workers: {max_workers})")
 
     alerts_enabled = bool(settings.telegram_bot_token or settings.discord_webhook_url)
     if alerts_enabled:
@@ -48,7 +50,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
     db_conn = get_connection()
 
     def do_scan():
-        opps = scan_all_pairs(poly, kalshi, cache.pairs, threshold=threshold)
+        opps = scan_all_pairs(
+            poly, kalshi, cache.pairs, threshold=threshold, max_workers=max_workers
+        )
         log_opportunities(db_conn, opps)
         if alerts_enabled:
             send_alerts(opps)
@@ -116,10 +120,35 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> None:
-    """Compute calibration curves from historical data."""
+    """Compute, ingest, or view calibration data."""
     from pathlib import Path
 
-    from arbscanner.calibration import compute_calibration_curves, get_historical_edge_stats
+    from arbscanner.calibration import (
+        compute_calibration_curves,
+        get_historical_edge_stats,
+        ingest_from_exchange,
+        ingest_from_url,
+    )
+
+    if args.ingest_url:
+        console.print(f"[bold]Downloading historical dataset from {args.ingest_url}...[/bold]")
+        try:
+            count = ingest_from_url(args.ingest_url)
+            console.print(f"[green]Ingested {count} rows[/green]")
+        except Exception as e:
+            console.print(f"[red]Ingestion failed: {e}[/red]")
+            sys.exit(1)
+        return
+
+    if args.ingest_live:
+        console.print("[bold]Fetching resolved markets from both exchanges...[/bold]")
+        poly, kalshi = create_exchanges()
+        poly_count = ingest_from_exchange(poly, "Polymarket", limit=args.limit)
+        kalshi_count = ingest_from_exchange(kalshi, "Kalshi", limit=args.limit)
+        console.print(
+            f"[green]Ingested {poly_count} Polymarket + {kalshi_count} Kalshi resolved markets[/green]"
+        )
+        return
 
     if args.data_file:
         data_path = Path(args.data_file)
@@ -131,17 +160,19 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         curves = compute_calibration_curves(data_path)
         console.print(f"[bold green]Computed {len(curves)} calibration entries[/bold green]")
         console.print(curves.to_string())
-    else:
-        console.print("[bold]Historical edge statistics from scanner database:[/bold]\n")
-        stats = get_historical_edge_stats()
-        if not stats:
-            console.print("[yellow]No historical data yet. Run 'arbscanner scan' first.[/yellow]")
-            return
-        for k, v in stats.items():
-            if isinstance(v, float):
-                console.print(f"  {k}: {v:.4f}")
-            else:
-                console.print(f"  {k}: {v}")
+        return
+
+    # Default: show stats from scanner DB
+    console.print("[bold]Historical edge statistics from scanner database:[/bold]\n")
+    stats = get_historical_edge_stats()
+    if not stats:
+        console.print("[yellow]No historical data yet. Run 'arbscanner scan' first.[/yellow]")
+        return
+    for k, v in stats.items():
+        if isinstance(v, float):
+            console.print(f"  {k}: {v:.4f}")
+        else:
+            console.print(f"  {k}: {v}")
 
 
 def main() -> None:
@@ -161,6 +192,12 @@ def main() -> None:
     )
     scan_parser.add_argument(
         "--threshold", type=float, default=0.01, help="Min net edge threshold (default: 0.01)"
+    )
+    scan_parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=settings.max_workers,
+        help=f"Parallel workers for order book fetches (default: {settings.max_workers})",
     )
 
     # match command
@@ -185,9 +222,23 @@ def main() -> None:
     )
 
     # calibrate command
-    cal_parser = subparsers.add_parser("calibrate", help="Compute or view calibration data")
+    cal_parser = subparsers.add_parser("calibrate", help="Compute, ingest, or view calibration data")
     cal_parser.add_argument(
-        "--data-file", help="Path to historical resolution data (Parquet)"
+        "--data-file", help="Path to historical resolution data (Parquet) to compute curves from"
+    )
+    cal_parser.add_argument(
+        "--ingest-url", help="Download a historical Parquet dataset from a URL"
+    )
+    cal_parser.add_argument(
+        "--ingest-live",
+        action="store_true",
+        help="Fetch resolved markets from Polymarket and Kalshi via pmxt",
+    )
+    cal_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max resolved markets to fetch per exchange (for --ingest-live)",
     )
 
     args = parser.parse_args()
