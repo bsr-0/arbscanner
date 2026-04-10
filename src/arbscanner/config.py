@@ -12,6 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = PROJECT_ROOT / "arbscanner.db"
 MATCHED_PAIRS_PATH = DATA_DIR / "matched_pairs.json"
+CALIBRATION_DATA_DIR = DATA_DIR / "calibration"
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 
 @dataclass
@@ -24,6 +26,26 @@ class Settings:
     llm_confirm_low: float = 0.7
     llm_confirm_high: float = 0.9
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+
+    # Alerts
+    telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+    discord_webhook_url: str = field(
+        default_factory=lambda: os.getenv("DISCORD_WEBHOOK_URL", "")
+    )
+    alert_threshold: float = 0.02  # net edge threshold for sending alerts
+
+    # Stripe
+    stripe_secret_key: str = field(default_factory=lambda: os.getenv("STRIPE_SECRET_KEY", ""))
+    stripe_webhook_secret: str = field(
+        default_factory=lambda: os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    )
+    stripe_price_id: str = field(default_factory=lambda: os.getenv("STRIPE_PRICE_ID", ""))
+
+    # Web
+    secret_key: str = field(
+        default_factory=lambda: os.getenv("ARBSCANNER_SECRET_KEY", "dev-secret-key")
+    )
 
 
 # Kalshi exact bracket-based fee schedule (per contract, symmetric around 50c).

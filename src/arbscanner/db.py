@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     """Get a SQLite connection, creating the schema if needed."""
     path = db_path or DB_PATH
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.execute(SCHEMA)
     conn.commit()
     return conn

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ArbScanner — Cross-Platform Prediction Market Arbitrage</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; }
+
+        .hero { text-align: center; padding: 80px 24px 60px; max-width: 720px; margin: 0 auto; }
+        .hero h1 { font-size: 48px; font-weight: 800; color: #fff; margin-bottom: 16px; }
+        .hero h1 span { color: #58a6ff; }
+        .hero p { font-size: 18px; color: #8b949e; max-width: 560px; margin: 0 auto 32px; }
+        .hero-stats { display: flex; justify-content: center; gap: 48px; margin-bottom: 40px; }
+        .hero-stats .stat { text-align: center; }
+        .hero-stats .num { font-size: 32px; font-weight: 700; color: #3fb950; }
+        .hero-stats .label { font-size: 13px; color: #8b949e; }
+
+        .cta { display: inline-block; padding: 12px 32px; background: #238636; color: #fff; font-size: 16px; font-weight: 600; border-radius: 6px; text-decoration: none; margin-right: 12px; }
+        .cta:hover { background: #2ea043; }
+        .cta-secondary { display: inline-block; padding: 12px 32px; background: #21262d; color: #c9d1d9; font-size: 16px; font-weight: 600; border-radius: 6px; text-decoration: none; border: 1px solid #30363d; }
+        .cta-secondary:hover { background: #30363d; }
+
+        .section { max-width: 900px; margin: 0 auto; padding: 60px 24px; }
+        .section h2 { font-size: 28px; font-weight: 700; color: #fff; margin-bottom: 12px; }
+        .section p { color: #8b949e; margin-bottom: 24px; }
+
+        .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 24px; margin-top: 32px; }
+        .feature { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 24px; }
+        .feature h3 { color: #58a6ff; font-size: 16px; margin-bottom: 8px; }
+        .feature p { font-size: 14px; color: #8b949e; margin: 0; }
+
+        .pricing { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; max-width: 700px; margin: 32px auto 0; }
+        .plan { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 32px; text-align: center; }
+        .plan.featured { border-color: #58a6ff; }
+        .plan h3 { font-size: 20px; color: #fff; margin-bottom: 8px; }
+        .plan .price { font-size: 36px; font-weight: 700; color: #fff; margin: 16px 0; }
+        .plan .price span { font-size: 16px; color: #8b949e; font-weight: 400; }
+        .plan ul { list-style: none; text-align: left; margin: 24px 0; }
+        .plan ul li { padding: 6px 0; font-size: 14px; color: #8b949e; }
+        .plan ul li::before { content: "✓ "; color: #3fb950; font-weight: 700; }
+        .plan ul li.disabled::before { content: "✗ "; color: #484f58; }
+        .plan ul li.disabled { color: #484f58; }
+        .plan .plan-cta { display: block; padding: 10px; background: #21262d; color: #c9d1d9; border-radius: 6px; text-decoration: none; font-weight: 600; margin-top: 16px; }
+        .plan.featured .plan-cta { background: #238636; color: #fff; }
+        .plan.featured .plan-cta:hover { background: #2ea043; }
+
+        .how-it-works { counter-reset: step; }
+        .step { display: flex; gap: 16px; margin-bottom: 24px; align-items: flex-start; }
+        .step::before { counter-increment: step; content: counter(step); background: #58a6ff; color: #0d1117; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0; }
+        .step div h4 { color: #fff; margin-bottom: 4px; }
+        .step div p { font-size: 14px; color: #8b949e; margin: 0; }
+
+        .footer { text-align: center; padding: 40px 24px; color: #484f58; font-size: 13px; border-top: 1px solid #21262d; }
+
+        @media (max-width: 600px) { .pricing { grid-template-columns: 1fr; } .hero h1 { font-size: 32px; } .hero-stats { gap: 24px; } }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>Arb<span>Scanner</span></h1>
+        <p>Automated cross-platform arbitrage detection for Polymarket and Kalshi. Find real edge with calibration-aware scoring.</p>
+        <div class="hero-stats">
+            <div class="stat">
+                <div class="num">{{ matched_pairs }}</div>
+                <div class="label">Matched Pairs</div>
+            </div>
+            <div class="stat">
+                <div class="num">{{ stats.get('total_opportunities', 0) }}</div>
+                <div class="label">Opportunities Found</div>
+            </div>
+            <div class="stat">
+                <div class="num">${{ "%.0f"|format(stats.get('total_profit', 0)) }}</div>
+                <div class="label">Total Edge Detected</div>
+            </div>
+        </div>
+        <a href="/dashboard" class="cta">Open Dashboard</a>
+        {% if stripe_configured %}
+        <a href="#pricing" class="cta-secondary">View Pricing</a>
+        {% endif %}
+    </div>
+
+    <div class="section">
+        <h2>Why ArbScanner?</h2>
+        <p>Nobody else monitors all overlapping markets continuously with net-of-fees calculation and calibration context.</p>
+        <div class="features">
+            <div class="feature">
+                <h3>Automated Market Matching</h3>
+                <p>AI-powered matching of identical markets across platforms using semantic embeddings and LLM confirmation. "Will the Fed cut rates?" matches "KXFEDCUT-26JUN" automatically.</p>
+            </div>
+            <div class="feature">
+                <h3>Real-Time Scanning</h3>
+                <p>Continuous monitoring of all matched pairs with 30-second refresh cycles. Order book data, not just mid-prices.</p>
+            </div>
+            <div class="feature">
+                <h3>Net-of-Fees Calculation</h3>
+                <p>Exact Kalshi bracket-based fee schedule and Polymarket taker fees. See actual edge, not theoretical spreads.</p>
+            </div>
+            <div class="feature">
+                <h3>Calibration Context</h3>
+                <p>Historical accuracy data tells you if edge is real: "Pop Culture markets 30 days out are mispriced by ~8 points" vs "Politics 2 days out is very efficient."</p>
+            </div>
+            <div class="feature">
+                <h3>Telegram & Discord Alerts</h3>
+                <p>Instant notifications when opportunities exceed your threshold. Never miss an arb.</p>
+            </div>
+            <div class="feature">
+                <h3>Historical Logging</h3>
+                <p>Every opportunity logged to SQLite. Track which categories produce real edge over time.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="section how-it-works">
+        <h2>How It Works</h2>
+        <div class="step"><div><h4>Fetch Markets</h4><p>Pull all active binary markets from Polymarket and Kalshi via the pmxt unified API.</p></div></div>
+        <div class="step"><div><h4>Match Markets</h4><p>Sentence-transformer embeddings + Claude LLM confirmation identify the same event across platforms.</p></div></div>
+        <div class="step"><div><h4>Scan for Arbs</h4><p>For each matched pair, pull order books and check if buying YES on one + NO on the other costs less than $1.00.</p></div></div>
+        <div class="step"><div><h4>Score & Alert</h4><p>Subtract fees, rank by expected profit, add calibration context, and alert you when real edge appears.</p></div></div>
+    </div>
+
+    {% if stripe_configured %}
+    <div class="section" id="pricing">
+        <h2>Pricing</h2>
+        <p>Start free. Upgrade when you're ready to trade on every opportunity.</p>
+        <div class="pricing">
+            <div class="plan">
+                <h3>Free</h3>
+                <div class="price">$0<span>/mo</span></div>
+                <ul>
+                    <li>Top 3 opportunities</li>
+                    <li>5-minute delayed alerts</li>
+                    <li>Web dashboard</li>
+                    <li class="disabled">Full opportunity table</li>
+                    <li class="disabled">Real-time alerts</li>
+                    <li class="disabled">Calibration context</li>
+                    <li class="disabled">Telegram/Discord alerts</li>
+                </ul>
+                <a href="/dashboard" class="plan-cta">Get Started</a>
+            </div>
+            <div class="plan featured">
+                <h3>Pro</h3>
+                <div class="price">$29<span>/mo</span></div>
+                <ul>
+                    <li>All opportunities</li>
+                    <li>Real-time scanning</li>
+                    <li>Web + CLI dashboard</li>
+                    <li>Full opportunity table</li>
+                    <li>Real-time alerts</li>
+                    <li>Calibration context</li>
+                    <li>Telegram/Discord alerts</li>
+                </ul>
+                <a href="#" class="plan-cta" id="checkout-btn">Subscribe Now</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="footer">
+        ArbScanner &copy; 2026. Built with pmxt, sentence-transformers, and Claude.
+    </div>
+
+    {% if stripe_configured %}
+    <script>
+        document.getElementById('checkout-btn')?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            try {
+                const resp = await fetch('/api/stripe/checkout');
+                const data = await resp.json();
+                if (data.checkout_url) window.location.href = data.checkout_url;
+            } catch (err) {
+                alert('Payment system unavailable. Please try again later.');
+            }
+        });
+    </script>
+    {% endif %}
+</body>
+</html>
