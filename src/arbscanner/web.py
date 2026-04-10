@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from arbscanner.calibration import get_calibration_context, get_historical_edge_stats
 from arbscanner.config import DB_PATH, TEMPLATES_DIR, settings
 from arbscanner.db import get_connection
+from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ArbScanner", version="0.2.0", lifespan=lifespan)
+app.include_router(health_router)
 
 
 # --- JSON API endpoints ---

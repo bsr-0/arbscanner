@@ -45,7 +45,7 @@ def test_format_alert_direction_2():
 def test_send_alerts_below_threshold():
     """No alerts sent when all opportunities are below threshold."""
     opp = _make_opp(net_edge=0.005)
-    count = send_alerts([opp], threshold=0.02)
+    count = send_alerts([opp], threshold=0.02, dedup=False)
     assert count == 0
 
 
@@ -56,7 +56,7 @@ def test_send_alerts_no_config():
         mock_settings.telegram_bot_token = ""
         mock_settings.discord_webhook_url = ""
         mock_settings.alert_threshold = 0.02
-        count = send_alerts([opp], threshold=0.02)
+        count = send_alerts([opp], threshold=0.02, dedup=False)
     assert count == 0
 
 
@@ -69,7 +69,7 @@ def test_send_alerts_telegram():
         mock_settings.telegram_bot_token = "fake-token"
         mock_settings.discord_webhook_url = ""
         mock_settings.alert_threshold = 0.02
-        count = send_alerts([opp], threshold=0.02)
+        count = send_alerts([opp], threshold=0.02, dedup=False)
 
     assert count == 1
     mock_tg.assert_called_once()
@@ -85,6 +85,28 @@ def test_send_alerts_both_channels():
         mock_settings.telegram_bot_token = "fake-token"
         mock_settings.discord_webhook_url = "https://discord.com/webhook"
         mock_settings.alert_threshold = 0.02
-        count = send_alerts([opp], threshold=0.02)
+        count = send_alerts([opp], threshold=0.02, dedup=False)
 
     assert count == 2
+
+
+def test_send_alerts_dedup_suppresses_repeat():
+    """With dedup enabled, repeat alerts within TTL should be suppressed."""
+    from arbscanner.alerts import _deduper
+
+    # Reset deduper state to avoid cross-test contamination
+    _deduper._entries.clear()  # type: ignore[attr-defined]
+
+    opp = _make_opp(net_edge=0.10, poly_market_id="unique_p", kalshi_market_id="unique_k")
+
+    with patch("arbscanner.alerts.settings") as mock_settings, \
+         patch("arbscanner.alerts.send_telegram", return_value=True):
+        mock_settings.telegram_bot_token = "fake-token"
+        mock_settings.discord_webhook_url = ""
+        mock_settings.alert_threshold = 0.02
+
+        first = send_alerts([opp], threshold=0.02, dedup=True)
+        second = send_alerts([opp], threshold=0.02, dedup=True)
+
+    assert first == 1
+    assert second == 0  # deduped

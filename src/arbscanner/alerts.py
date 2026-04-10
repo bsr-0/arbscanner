@@ -4,10 +4,15 @@ import logging
 
 import httpx
 
+from arbscanner.alerts_dedup import AlertDeduper
 from arbscanner.config import settings
 from arbscanner.models import ArbOpportunity
 
 logger = logging.getLogger(__name__)
+
+# Module-level deduper: suppresses repeat alerts for the same opportunity
+# fingerprint within a 5-minute window, unless the edge changes by >0.5pt.
+_deduper = AlertDeduper(ttl_seconds=300, edge_delta=0.005)
 
 
 def format_alert(opp: ArbOpportunity) -> str:
@@ -54,8 +59,15 @@ def send_discord(message: str) -> bool:
         return False
 
 
-def send_alerts(opportunities: list[ArbOpportunity], threshold: float | None = None) -> int:
+def send_alerts(
+    opportunities: list[ArbOpportunity],
+    threshold: float | None = None,
+    dedup: bool = True,
+) -> int:
     """Send alerts for opportunities above the alert threshold.
+
+    Deduplicates repeat alerts via the module-level AlertDeduper unless
+    `dedup=False` is passed (useful for tests).
 
     Returns the number of alerts successfully sent.
     """
@@ -63,6 +75,19 @@ def send_alerts(opportunities: list[ArbOpportunity], threshold: float | None = N
         threshold = settings.alert_threshold
 
     alertable = [o for o in opportunities if o.net_edge >= threshold]
+    if not alertable:
+        return 0
+
+    if dedup:
+        filtered = _deduper.filter(alertable)
+        if len(filtered) < len(alertable):
+            logger.info(
+                "Deduped %d repeat alerts, %d new",
+                len(alertable) - len(filtered),
+                len(filtered),
+            )
+        alertable = filtered
+
     if not alertable:
         return 0
 

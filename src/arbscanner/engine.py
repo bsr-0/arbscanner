@@ -6,6 +6,14 @@ from datetime import datetime, timezone
 
 from arbscanner.config import kalshi_fee, poly_fee, settings
 from arbscanner.exchanges import fetch_order_book_safe
+from arbscanner.metrics import (
+    opportunities_found_total,
+    order_book_fetch_failures_total,
+    order_book_fetches_total,
+    scan_cycle_seconds,
+    scan_cycles_total,
+    timing_block,
+)
 from arbscanner.models import ArbOpportunity, MatchedPair
 
 logger = logging.getLogger(__name__)
@@ -168,21 +176,39 @@ def scan_all_pairs(
     if not pairs:
         return []
 
-    # Phase 1: parallel fetch of all order books
-    books = _fetch_all_books(poly_exchange, kalshi_exchange, pairs, max_workers)
+    with timing_block(scan_cycle_seconds):
+        # Phase 1: parallel fetch of all order books
+        books = _fetch_all_books(poly_exchange, kalshi_exchange, pairs, max_workers)
 
-    # Phase 2: compute arbs locally (fast, no I/O)
-    all_opps: list[ArbOpportunity] = []
-    for pair in pairs:
-        try:
-            opps = calculate_arb(pair, books)
-            all_opps.extend(opps)
-        except Exception:
-            logger.exception("Error scanning pair: %s <-> %s", pair.poly_title, pair.kalshi_title)
+        # Record fetch metrics from the books dict
+        for outcome_id, book in books.items():
+            order_book_fetches_total.inc()
+            if book is None:
+                order_book_fetch_failures_total.inc()
 
-    # Filter by threshold and sort by expected profit
-    filtered = [o for o in all_opps if o.net_edge >= threshold]
-    filtered.sort(key=lambda o: o.expected_profit, reverse=True)
+        # Phase 2: compute arbs locally (fast, no I/O)
+        all_opps: list[ArbOpportunity] = []
+        for pair in pairs:
+            try:
+                opps = calculate_arb(pair, books)
+                all_opps.extend(opps)
+            except Exception:
+                logger.exception(
+                    "Error scanning pair: %s <-> %s", pair.poly_title, pair.kalshi_title
+                )
 
-    logger.info("Found %d opportunities above %.1f%% threshold", len(filtered), threshold * 100)
-    return filtered
+        # Filter by threshold and sort by expected profit
+        filtered = [o for o in all_opps if o.net_edge >= threshold]
+        filtered.sort(key=lambda o: o.expected_profit, reverse=True)
+
+        # Metrics
+        scan_cycles_total.inc()
+        for opp in filtered:
+            opportunities_found_total.inc(direction=opp.direction)
+
+        logger.info(
+            "Found %d opportunities above %.1f%% threshold",
+            len(filtered),
+            threshold * 100,
+        )
+        return filtered

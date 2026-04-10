@@ -1,7 +1,6 @@
 """CLI entry point for arbscanner."""
 
 import argparse
-import logging
 import sys
 
 from rich.console import Console
@@ -11,6 +10,7 @@ from arbscanner.dashboard import run_dashboard
 from arbscanner.db import get_connection, log_opportunities
 from arbscanner.engine import scan_all_pairs
 from arbscanner.exchanges import create_exchanges, fetch_all_markets
+from arbscanner.logging_config import setup_logging
 from arbscanner.matcher import load_cache, run_matching
 
 console = Console()
@@ -175,6 +175,46 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
             console.print(f"  {k}: {v}")
 
 
+def cmd_backup(args: argparse.Namespace) -> None:
+    """Backup, restore, list, or prune the SQLite database."""
+    from pathlib import Path
+
+    from arbscanner.backup import (
+        backup_database,
+        list_backups,
+        prune_backups,
+        prune_old_opportunities,
+        restore_database,
+    )
+
+    if args.action == "create":
+        path = backup_database()
+        console.print(f"[green]Backup created: {path}[/green]")
+    elif args.action == "list":
+        backups = list_backups()
+        if not backups:
+            console.print("[yellow]No backups found.[/yellow]")
+            return
+        console.print(f"[bold]{len(backups)} backups:[/bold]")
+        for b in backups:
+            size_mb = b.stat().st_size / 1024 / 1024
+            console.print(f"  {b.name} ({size_mb:.2f} MB)")
+    elif args.action == "restore":
+        if not args.file:
+            console.print("[red]--file is required for restore[/red]")
+            sys.exit(1)
+        restore_database(Path(args.file), force=args.force)
+        console.print(f"[green]Restored from {args.file}[/green]")
+    elif args.action == "prune":
+        deleted = prune_backups(keep=args.keep)
+        console.print(f"[green]Pruned {deleted} old backups (kept newest {args.keep})[/green]")
+    elif args.action == "prune-opps":
+        deleted = prune_old_opportunities(keep_days=args.days)
+        console.print(
+            f"[green]Deleted {deleted} opportunities older than {args.days} days[/green]"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="arbscanner",
@@ -241,15 +281,30 @@ def main() -> None:
         help="Max resolved markets to fetch per exchange (for --ingest-live)",
     )
 
+    # backup command
+    backup_parser = subparsers.add_parser(
+        "backup", help="Database backup, restore, list, prune"
+    )
+    backup_parser.add_argument(
+        "action",
+        choices=["create", "list", "restore", "prune", "prune-opps"],
+        help="Backup action to perform",
+    )
+    backup_parser.add_argument("--file", help="Backup file path (for restore)")
+    backup_parser.add_argument(
+        "--force", action="store_true", help="Force restore even with active DB journal"
+    )
+    backup_parser.add_argument(
+        "--keep", type=int, default=10, help="Number of backups to keep when pruning"
+    )
+    backup_parser.add_argument(
+        "--days", type=int, default=30, help="Keep opportunities newer than N days"
+    )
+
     args = parser.parse_args()
 
-    # Configure logging
-    level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # Configure logging via our structured logging setup
+    setup_logging(level="DEBUG" if args.verbose else "INFO")
 
     commands = {
         "scan": cmd_scan,
@@ -257,6 +312,7 @@ def main() -> None:
         "pairs": cmd_pairs,
         "serve": cmd_serve,
         "calibrate": cmd_calibrate,
+        "backup": cmd_backup,
     }
     commands[args.command](args)
 
