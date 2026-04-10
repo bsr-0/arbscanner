@@ -1,0 +1,106 @@
+# .dockerignore for arbscanner
+# Excludes files from the Docker build context so images stay small,
+# builds stay fast, and secrets/local state never get baked in.
+
+# ---------------------------------------------------------------------------
+# Version control
+# ---------------------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github/
+
+# ---------------------------------------------------------------------------
+# Python bytecode and caches
+# ---------------------------------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py[codz]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# ---------------------------------------------------------------------------
+# Build artifacts and packaging
+# ---------------------------------------------------------------------------
+*.egg-info/
+*.egg
+build/
+dist/
+wheels/
+.eggs/
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ---------------------------------------------------------------------------
+# IDE / editor / OS cruft
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Local runtime data (should not be baked into the image)
+# ---------------------------------------------------------------------------
+data/
+arbscanner.db
+arbscanner.db-journal
+*.log
+
+# ---------------------------------------------------------------------------
+# Environment files with secrets (keep .env.example so the image can
+# ship a template config)
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Docs not needed at runtime (keep README.md for image metadata)
+# ---------------------------------------------------------------------------
+docs/
+*.md
+!README.md
+
+# ---------------------------------------------------------------------------
+# Tests, scripts, examples — not needed in production image
+# ---------------------------------------------------------------------------
+tests/
+scripts/
+examples/
+
+# ---------------------------------------------------------------------------
+# Node sidecar artifacts (if a JS dashboard lives alongside the Python app)
+# ---------------------------------------------------------------------------
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# ---------------------------------------------------------------------------
+# Docker files themselves don't need to be inside the build context
+# ---------------------------------------------------------------------------
+Dockerfile
+docker-compose.yml
+.dockerignore

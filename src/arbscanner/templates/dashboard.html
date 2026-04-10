@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ArbScanner Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0d1117; color: #c9d1d9; }
+        .header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 20px; color: #58a6ff; }
+        .stats { display: flex; gap: 24px; font-size: 13px; color: #8b949e; }
+        .stats .value { color: #c9d1d9; font-weight: 600; }
+        .controls { padding: 12px 24px; border-bottom: 1px solid #21262d; display: flex; gap: 16px; align-items: center; }
+        .controls label { font-size: 13px; color: #8b949e; }
+        .controls select, .controls input { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 13px; }
+        .table-container { padding: 16px 24px; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; padding: 8px 12px; border-bottom: 2px solid #21262d; color: #8b949e; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+        td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+        tr:hover { background: #161b22; }
+        .positive { color: #3fb950; font-weight: 600; }
+        .warning { color: #d29922; }
+        .dim { color: #484f58; }
+        .edge-high { color: #3fb950; font-weight: 700; }
+        .edge-med { color: #d29922; }
+        .edge-low { color: #8b949e; }
+        .direction { font-size: 11px; padding: 2px 6px; border-radius: 3px; background: #1f2937; white-space: nowrap; }
+        .calibration { font-size: 11px; color: #8b949e; margin-top: 4px; }
+        .calibration.real { color: #3fb950; }
+        .calibration.noise { color: #d29922; }
+        .refresh-bar { position: fixed; bottom: 0; left: 0; right: 0; height: 3px; background: #21262d; }
+        .refresh-bar .progress { height: 100%; background: #58a6ff; transition: width 1s linear; }
+        .empty { text-align: center; padding: 48px; color: #484f58; }
+        .price { font-family: monospace; }
+        @media (max-width: 768px) { .table-container { padding: 8px; } td, th { padding: 6px 8px; font-size: 12px; } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>ArbScanner</h1>
+        <div class="stats">
+            <span>Pairs: <span class="value" id="pairs-count">-</span></span>
+            <span>Opportunities: <span class="value" id="opp-count">-</span></span>
+            <span>Last scan: <span class="value" id="last-scan">-</span></span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <label>Min edge:
+            <select id="min-edge">
+                <option value="0">All</option>
+                <option value="0.005">0.5%</option>
+                <option value="0.01" selected>1%</option>
+                <option value="0.02">2%</option>
+                <option value="0.05">5%</option>
+            </select>
+        </label>
+        <label>Lookback:
+            <select id="hours">
+                <option value="1">1 hour</option>
+                <option value="6">6 hours</option>
+                <option value="24" selected>24 hours</option>
+                <option value="168">7 days</option>
+            </select>
+        </label>
+        <label>Refresh:
+            <select id="refresh-interval">
+                <option value="10">10s</option>
+                <option value="30" selected>30s</option>
+                <option value="60">60s</option>
+            </select>
+        </label>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Market</th>
+                    <th>Direction</th>
+                    <th>Poly</th>
+                    <th>Kalshi</th>
+                    <th>Gross Edge</th>
+                    <th>Net Edge</th>
+                    <th>Size</th>
+                    <th>$ Profit</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody id="opp-table"></tbody>
+        </table>
+        <div class="empty" id="empty-msg" style="display:none;">No opportunities above threshold. Scanner is monitoring matched pairs.</div>
+    </div>
+
+    <div class="refresh-bar"><div class="progress" id="progress"></div></div>
+
+    <script>
+        let refreshTimer = null;
+        let countdown = 0;
+
+        function edgeClass(edge) {
+            if (edge >= 0.02) return 'edge-high';
+            if (edge >= 0.01) return 'edge-med';
+            return 'edge-low';
+        }
+
+        function formatDirection(d) {
+            return d === 'poly_yes_kalshi_no' ? 'P.Yes + K.No' : 'P.No + K.Yes';
+        }
+
+        function formatTime(ts) {
+            const d = new Date(ts);
+            return d.toLocaleTimeString();
+        }
+
+        async function fetchData() {
+            const minEdge = document.getElementById('min-edge').value;
+            const hours = document.getElementById('hours').value;
+            try {
+                const [oppResp, statsResp] = await Promise.all([
+                    fetch(`/api/opportunities?min_edge=${minEdge}&hours=${hours}&limit=100`),
+                    fetch('/api/stats')
+                ]);
+                const opps = await oppResp.json();
+                const stats = await statsResp.json();
+
+                document.getElementById('pairs-count').textContent = stats.matched_pairs || '-';
+                document.getElementById('opp-count').textContent = opps.length;
+                document.getElementById('last-scan').textContent = new Date().toLocaleTimeString();
+
+                const tbody = document.getElementById('opp-table');
+                const emptyMsg = document.getElementById('empty-msg');
+
+                if (opps.length === 0) {
+                    tbody.innerHTML = '';
+                    emptyMsg.style.display = 'block';
+                    return;
+                }
+                emptyMsg.style.display = 'none';
+
+                tbody.innerHTML = opps.map(o => `
+                    <tr>
+                        <td>${o.market_title.length > 50 ? o.market_title.slice(0, 47) + '...' : o.market_title}</td>
+                        <td><span class="direction">${formatDirection(o.direction)}</span></td>
+                        <td class="price">${(o.poly_price * 100).toFixed(1)}&#162;</td>
+                        <td class="price">${(o.kalshi_price * 100).toFixed(1)}&#162;</td>
+                        <td class="${edgeClass(o.gross_edge)}">${(o.gross_edge * 100).toFixed(1)}%</td>
+                        <td class="${edgeClass(o.net_edge)}">${(o.net_edge * 100).toFixed(1)}%</td>
+                        <td>${o.available_size.toFixed(0)}</td>
+                        <td class="${edgeClass(o.net_edge)}">$${o.expected_profit.toFixed(2)}</td>
+                        <td class="dim">${formatTime(o.timestamp)}</td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                console.error('Fetch error:', err);
+            }
+        }
+
+        function startRefresh() {
+            if (refreshTimer) clearInterval(refreshTimer);
+            const interval = parseInt(document.getElementById('refresh-interval').value);
+            countdown = interval;
+            fetchData();
+            refreshTimer = setInterval(() => {
+                countdown--;
+                const pct = ((interval - countdown) / interval) * 100;
+                document.getElementById('progress').style.width = pct + '%';
+                if (countdown <= 0) {
+                    fetchData();
+                    countdown = interval;
+                }
+            }, 1000);
+        }
+
+        document.getElementById('min-edge').addEventListener('change', fetchData);
+        document.getElementById('hours').addEventListener('change', fetchData);
+        document.getElementById('refresh-interval').addEventListener('change', startRefresh);
+
+        startRefresh();
+    </script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+# arbscanner.service — systemd unit for the arbscanner FastAPI web dashboard.
+#
+# This unit runs `arbscanner serve` as a long-lived system daemon bound to
+# 0.0.0.0:8000. It assumes the application has been installed to
+# /opt/arbscanner with a uv-managed virtualenv at /opt/arbscanner/.venv.
+#
+# Installation
+# ------------
+#   # 1. Create the dedicated service user (no login, no shell):
+#   sudo useradd -r -s /bin/false arbscanner
+#
+#   # 2. Install the project to /opt/arbscanner and create the venv, e.g.:
+#   #    sudo git clone https://github.com/you/arbscanner /opt/arbscanner
+#   #    sudo chown -R arbscanner:arbscanner /opt/arbscanner
+#   #    sudo -u arbscanner bash -c 'cd /opt/arbscanner && uv sync'
+#
+#   # 3. Drop the unit file into place and enable it:
+#   sudo cp arbscanner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now arbscanner
+#
+#   # 4. Follow logs:
+#   sudo journalctl -u arbscanner -f
+#
+# Configuration
+# -------------
+# Environment variables (API keys, DB paths, alert webhooks, etc.) should be
+# placed in /opt/arbscanner/.env — the leading `-` on EnvironmentFile below
+# makes that file optional so the unit still starts on a fresh install.
+#
+# ### Alternative: arbscanner-scan.service (scanner loop daemon)
+#
+# To additionally run the continuous scanner loop as its own daemon, create
+# a second unit file at /etc/systemd/system/arbscanner-scan.service with
+# the same structure but a different ExecStart. Example contents:
+#
+#     [Unit]
+#     Description=Arbscanner continuous scanner loop
+#     After=network.target arbscanner.service
+#     # After=redis.service postgresql.service
+#
+#     [Service]
+#     Type=simple
+#     User=arbscanner
+#     Group=arbscanner
+#     WorkingDirectory=/opt/arbscanner
+#     EnvironmentFile=-/opt/arbscanner/.env
+#     ExecStart=/opt/arbscanner/.venv/bin/arbscanner scan --interval 30 --threshold 0.01
+#     Restart=always
+#     RestartSec=10
+#     StandardOutput=journal
+#     StandardError=journal
+#
+#     NoNewPrivileges=true
+#     PrivateTmp=true
+#     ProtectSystem=strict
+#     ProtectHome=true
+#     ReadWritePaths=/opt/arbscanner /opt/arbscanner/data
+#
+#     [Install]
+#     WantedBy=multi-user.target
+#
+# Enable it alongside the web service with:
+#   sudo systemctl enable --now arbscanner-scan
+#   sudo journalctl -u arbscanner-scan -f
+
+[Unit]
+Description=Arbscanner cross-platform prediction market arbitrage web dashboard
+Documentation=https://github.com/you/arbscanner
+After=network.target
+# Uncomment if you add Redis or Postgres as dependencies:
+# After=network.target redis.service postgresql.service
+# Requires=redis.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arbscanner
+Group=arbscanner
+WorkingDirectory=/opt/arbscanner
+
+# Optional env file (leading `-` = do not fail if missing)
+EnvironmentFile=-/opt/arbscanner/.env
+
+ExecStart=/opt/arbscanner/.venv/bin/arbscanner serve --host 0.0.0.0 --port 8000
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arbscanner
+
+# --- Security hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Writable paths for SQLite DB, matcher cache, calibration data, etc.
+ReadWritePaths=/opt/arbscanner /opt/arbscanner/data
+
+[Install]
+WantedBy=multi-user.target
