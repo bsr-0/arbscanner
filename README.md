@@ -18,6 +18,7 @@ Every candidate opportunity is scored against a historical calibration layer der
 - **FastAPI web dashboard** with a live-updating HTML table and JSON API
 - **Telegram + Discord webhooks** for real-time alerts when edge crosses a threshold
 - **SQLite opportunity log** for historical analysis and backtesting
+- **Paper trading simulator** that auto-opens simulated positions on high-edge opportunities, tracks expected-vs-realized edge, and exposes a CLI + JSON API for the account
 - **Calibration layer** powered by Jon Becker's historical dataset (Parquet) or live resolved-market ingestion
 - **Parallel order-book fetches** with configurable worker pool for fast scans across hundreds of pairs
 - **Stripe-ready** landing page for the paid tier (optional)
@@ -109,10 +110,16 @@ Runs the matching pipeline (if no cache exists), then continuously scans every m
 | `--interval` | `30` | Seconds between refreshes |
 | `--threshold` | `0.01` | Minimum net edge (1%) for an opportunity to appear |
 | `--max-workers` | from settings | Parallel workers for order-book fetches |
+| `--paper` | off | Auto-open simulated paper trading positions for every new high-edge opportunity |
+| `--paper-balance` | `10000` | Starting balance for the paper trading account (first run only) |
+| `--paper-threshold` | `0.02` | Minimum net edge required to auto-open a paper position |
 
 ```bash
 # Aggressive: 10s refresh, show everything above 0.5% net edge, 16 workers
 uv run arbscanner scan --interval 10 --threshold 0.005 --max-workers 16
+
+# Same, but also simulate trades at 2%+ net edge with a $25k starting bankroll
+uv run arbscanner scan --paper --paper-balance 25000 --paper-threshold 0.02
 ```
 
 ### `arbscanner match` — build the matched-pair map
@@ -156,6 +163,40 @@ uv run arbscanner serve --host 0.0.0.0 --port 8000
 # Development with hot reload
 uv run arbscanner serve --reload
 ```
+
+### `arbscanner paper` — paper trading account
+
+Manage a simulated execution account populated either by `scan --paper` or by
+manually opening positions from logged opportunities. Positions are persisted
+to a dedicated `paper_positions` table in the scanner SQLite DB, so account
+state survives restarts.
+
+```bash
+# Aggregate account summary (balance, PnL, win rate)
+uv run arbscanner paper summary
+
+# List all positions, only open, or only closed
+uv run arbscanner paper list --status open
+
+# Open a position from a logged opportunity row (see /api/opportunities for ids)
+uv run arbscanner paper open --opportunity-id 42 --size 50
+
+# Mark-to-market close at supplied prices
+uv run arbscanner paper close --position-id 7 --poly-price 0.55 --kalshi-price 0.40
+
+# Close at final resolution — "yes" or "no" is the market outcome
+uv run arbscanner paper resolve --position-id 7 --outcome yes
+```
+
+| Flag | Description |
+|------|-------------|
+| `--balance` | Starting balance (first run only, default 10000) |
+| `--status` | Filter for `list`: `open` / `closed` / `all` (default `all`) |
+| `--opportunity-id` | Logged opportunity ID for `open` |
+| `--size` | Override size (contracts) for `open` |
+| `--position-id` | Paper position ID for `close` / `resolve` |
+| `--poly-price`, `--kalshi-price` | Mark prices for `close` |
+| `--outcome` | `yes` or `no` for `resolve` |
 
 ### `arbscanner calibrate` — calibration data
 
@@ -257,6 +298,7 @@ Read-only scanning requires only `ANTHROPIC_API_KEY` (and only for the matching 
 | `arbscanner.alerts` | Telegram + Discord webhook dispatch |
 | `arbscanner.calibration` | Historical dataset ingestion and curve computation |
 | `arbscanner.db` | SQLite opportunity log |
+| `arbscanner.paper_trading` | Simulated execution account for expected-vs-realized edge tracking |
 
 ---
 
@@ -272,6 +314,10 @@ Start the server with `uv run arbscanner serve` and browse to the endpoints belo
 | `/api/stats` | GET | Aggregate scanner stats (pair count, last scan time, edge histogram) |
 | `/api/calibration` | GET | Calibration curves by category × time-to-resolution |
 | `/api/pairs` | GET | Every matched pair with confidence and source |
+| `/api/paper/summary` | GET | Paper trading account summary |
+| `/api/paper/positions` | GET | Paper positions (`?status=open\|closed\|all`) |
+| `/api/paper/positions/{id}/close` | POST | Mark-to-market close: `{poly_price, kalshi_price}` |
+| `/api/paper/positions/{id}/resolve` | POST | Resolve at outcome: `{yes_won: true\|false}` |
 
 The JSON endpoints are public by default and safe to poll from external tools or scripts. If you're exposing the server beyond localhost, put it behind a reverse proxy and set `ARBSCANNER_SECRET_KEY` to something long and random.
 
@@ -309,6 +355,12 @@ Both planned weeks from the technical plan are complete, plus a round of pipelin
 - Incremental re-matching so `arbscanner match` only processes new markets
 - `calibrate --ingest-live` for on-demand historical ingestion straight from the exchanges
 - Aggregate edge statistics surfaced via `arbscanner calibrate` and `/api/stats`
+
+**Paper trading simulator** — complete
+- Persistent `paper_positions` SQLite table with open/close/resolve lifecycle
+- `arbscanner scan --paper` auto-opens simulated positions on new high-edge opportunities (with pair+direction dedup)
+- `arbscanner paper {summary, list, open, close, resolve}` CLI
+- `/api/paper/*` JSON endpoints for dashboards and scripts
 
 **Roadmap**
 - v3 delivery goal: one-click execution via `pmxt`

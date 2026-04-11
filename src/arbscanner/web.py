@@ -10,12 +10,14 @@ import stripe
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from arbscanner.calibration import get_calibration_context, get_historical_edge_stats
 from arbscanner.config import DB_PATH, TEMPLATES_DIR, settings
 from arbscanner.db import get_connection
 from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
+from arbscanner.paper_trading import PaperPosition, PaperTradingEngine
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +30,11 @@ async def lifespan(app: FastAPI):
     if settings.stripe_secret_key:
         stripe.api_key = settings.stripe_secret_key
     app.state.db = get_connection()
+    app.state.paper_engine = PaperTradingEngine()
     app.state.start_time = time.time()
     yield
     app.state.db.close()
+    app.state.paper_engine.close()
 
 
 app = FastAPI(title="ArbScanner", version="0.2.0", lifespan=lifespan)
@@ -135,6 +139,102 @@ def get_calibration(
         "edge_likely_real": ctx.edge_likely_real,
         "confidence_note": ctx.confidence_note,
     }
+
+
+# --- Paper trading ---
+
+
+def _paper_engine(request: Request) -> PaperTradingEngine:
+    engine = getattr(request.app.state, "paper_engine", None)
+    if engine is None:
+        engine = PaperTradingEngine()
+        request.app.state.paper_engine = engine
+    return engine
+
+
+def _serialize_position(position: PaperPosition) -> dict:
+    return {
+        "id": position.id,
+        "opportunity_id": position.opportunity_id,
+        "opened_at": position.opened_at.isoformat(),
+        "pair_id": position.pair_id,
+        "direction": position.direction,
+        "poly_side": position.poly_side,
+        "kalshi_side": position.kalshi_side,
+        "entry_poly_price": position.entry_poly_price,
+        "entry_kalshi_price": position.entry_kalshi_price,
+        "size": position.size,
+        "expected_profit": position.expected_profit,
+        "status": position.status,
+        "closed_at": position.closed_at.isoformat() if position.closed_at else None,
+        "realized_pnl": position.realized_pnl,
+    }
+
+
+class PaperClosePayload(BaseModel):
+    poly_price: float = Field(..., ge=0.0, le=1.0)
+    kalshi_price: float = Field(..., ge=0.0, le=1.0)
+
+
+class PaperResolvePayload(BaseModel):
+    yes_won: bool
+
+
+@app.get("/api/paper/summary")
+def paper_summary(request: Request):
+    """Return the aggregate paper trading account summary."""
+    return _paper_engine(request).summary()
+
+
+@app.get("/api/paper/positions")
+def paper_positions(
+    request: Request,
+    status: str = Query("all", pattern="^(open|closed|all)$"),
+):
+    """List paper trading positions, optionally filtered by status."""
+    account = _paper_engine(request).get_account()
+    if status == "open":
+        positions = [p for p in account.positions if p.status == "open"]
+    elif status == "closed":
+        positions = [p for p in account.positions if p.status == "closed"]
+    else:
+        positions = account.positions
+    return {
+        "balance": account.balance,
+        "total_pnl": account.total_pnl,
+        "count": len(positions),
+        "positions": [_serialize_position(p) for p in positions],
+    }
+
+
+@app.post("/api/paper/positions/{position_id}/close")
+def paper_close_position(
+    position_id: int, payload: PaperClosePayload, request: Request
+):
+    """Mark-to-market close for an open paper position."""
+    engine = _paper_engine(request)
+    try:
+        pnl = engine.close_position(
+            position_id,
+            poly_price=payload.poly_price,
+            kalshi_price=payload.kalshi_price,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"position_id": position_id, "realized_pnl": pnl}
+
+
+@app.post("/api/paper/positions/{position_id}/resolve")
+def paper_resolve_position(
+    position_id: int, payload: PaperResolvePayload, request: Request
+):
+    """Close an open paper position at final resolution."""
+    engine = _paper_engine(request)
+    try:
+        pnl = engine.close_resolved_position(position_id, yes_won=payload.yes_won)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"position_id": position_id, "realized_pnl": pnl}
 
 
 # --- Stripe webhook ---

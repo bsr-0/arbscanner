@@ -392,6 +392,29 @@ class PaperTradingEngine:
             total_pnl=total_pnl,
         )
 
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        try:
+            self._conn.close()
+        except sqlite3.ProgrammingError:
+            # Already closed — harmless.
+            pass
+
+    def has_open_position(self, pair_id: str, direction: str | None = None) -> bool:
+        """Return True if an open position exists for this pair (+ optional direction)."""
+        if direction is None:
+            cur = self._conn.execute(
+                "SELECT 1 FROM paper_positions WHERE status = 'open' AND pair_id = ? LIMIT 1",
+                (pair_id,),
+            )
+        else:
+            cur = self._conn.execute(
+                """SELECT 1 FROM paper_positions
+                   WHERE status = 'open' AND pair_id = ? AND direction = ? LIMIT 1""",
+                (pair_id, direction),
+            )
+        return cur.fetchone() is not None
+
     def summary(self) -> dict:
         """Return a lightweight summary dict suitable for dashboards."""
         cur = self._conn.execute(
