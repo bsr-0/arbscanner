@@ -33,6 +33,15 @@
         .refresh-bar .progress { height: 100%; background: #58a6ff; transition: width 1s linear; }
         .empty { text-align: center; padding: 48px; color: #484f58; }
         .price { font-family: monospace; }
+        .paper-panel { padding: 12px 24px; border-bottom: 1px solid #21262d; background: #0b1018; display: none; }
+        .paper-panel.active { display: block; }
+        .paper-panel h2 { font-size: 12px; text-transform: uppercase; color: #8b949e; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .paper-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
+        .paper-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; }
+        .paper-card .label { font-size: 11px; text-transform: uppercase; color: #8b949e; letter-spacing: 0.5px; }
+        .paper-card .value { font-size: 18px; font-weight: 700; color: #c9d1d9; margin-top: 4px; font-family: monospace; }
+        .paper-card .value.positive { color: #3fb950; }
+        .paper-card .value.negative { color: #f85149; }
         @media (max-width: 768px) { .table-container { padding: 8px; } td, th { padding: 6px 8px; font-size: 12px; } }
     </style>
 </head>
@@ -43,6 +52,36 @@
             <span>Pairs: <span class="value" id="pairs-count">-</span></span>
             <span>Opportunities: <span class="value" id="opp-count">-</span></span>
             <span>Last scan: <span class="value" id="last-scan">-</span></span>
+        </div>
+    </div>
+
+    <div class="paper-panel" id="paper-panel">
+        <h2>Paper Trading Account</h2>
+        <div class="paper-grid">
+            <div class="paper-card">
+                <div class="label">Balance</div>
+                <div class="value" id="paper-balance">-</div>
+            </div>
+            <div class="paper-card">
+                <div class="label">Open Positions</div>
+                <div class="value" id="paper-open">-</div>
+            </div>
+            <div class="paper-card">
+                <div class="label">Total Trades</div>
+                <div class="value" id="paper-trades">-</div>
+            </div>
+            <div class="paper-card">
+                <div class="label">Realized P&L</div>
+                <div class="value" id="paper-pnl">-</div>
+            </div>
+            <div class="paper-card">
+                <div class="label">Win Rate</div>
+                <div class="value" id="paper-winrate">-</div>
+            </div>
+            <div class="paper-card">
+                <div class="label">Avg P&L / Trade</div>
+                <div class="value" id="paper-avg">-</div>
+            </div>
         </div>
     </div>
 
@@ -114,16 +153,60 @@
             return d.toLocaleTimeString();
         }
 
+        function formatMoney(amount) {
+            const sign = amount < 0 ? '-' : '';
+            return `${sign}$${Math.abs(amount).toFixed(2)}`;
+        }
+
+        function updatePaperPanel(summary) {
+            const panel = document.getElementById('paper-panel');
+            if (!summary || (summary.total_trades === 0 && summary.open_positions === 0)) {
+                panel.classList.remove('active');
+                return;
+            }
+            panel.classList.add('active');
+
+            document.getElementById('paper-balance').textContent = formatMoney(summary.balance);
+            document.getElementById('paper-open').textContent = summary.open_positions;
+            document.getElementById('paper-trades').textContent = summary.total_trades;
+
+            const pnlEl = document.getElementById('paper-pnl');
+            pnlEl.textContent = formatMoney(summary.total_pnl);
+            pnlEl.classList.toggle('positive', summary.total_pnl > 0);
+            pnlEl.classList.toggle('negative', summary.total_pnl < 0);
+
+            document.getElementById('paper-winrate').textContent =
+                (summary.win_rate * 100).toFixed(1) + '%';
+
+            const avgEl = document.getElementById('paper-avg');
+            avgEl.textContent = formatMoney(summary.avg_pnl_per_trade);
+            avgEl.classList.toggle('positive', summary.avg_pnl_per_trade > 0);
+            avgEl.classList.toggle('negative', summary.avg_pnl_per_trade < 0);
+        }
+
+        async function fetchPaperSummary() {
+            try {
+                const resp = await fetch('/api/paper/summary');
+                if (!resp.ok) return null;
+                return await resp.json();
+            } catch (err) {
+                return null;
+            }
+        }
+
         async function fetchData() {
             const minEdge = document.getElementById('min-edge').value;
             const hours = document.getElementById('hours').value;
             try {
-                const [oppResp, statsResp] = await Promise.all([
+                const [oppResp, statsResp, paperSummary] = await Promise.all([
                     fetch(`/api/opportunities?min_edge=${minEdge}&hours=${hours}&limit=100`),
-                    fetch('/api/stats')
+                    fetch('/api/stats'),
+                    fetchPaperSummary()
                 ]);
                 const opps = await oppResp.json();
                 const stats = await statsResp.json();
+
+                updatePaperPanel(paperSummary);
 
                 document.getElementById('pairs-count').textContent = stats.matched_pairs || '-';
                 document.getElementById('opp-count').textContent = opps.length;

@@ -361,6 +361,8 @@ Both planned weeks from the technical plan are complete, plus a round of pipelin
 - `arbscanner scan --paper` auto-opens simulated positions on new high-edge opportunities (with pair+direction dedup)
 - `arbscanner paper {summary, list, open, close, resolve}` CLI
 - `/api/paper/*` JSON endpoints for dashboards and scripts
+- Web dashboard shows a live Paper Trading Account panel (balance, open positions, P&L, win rate) as soon as the engine has any activity
+- Terminal dashboard caption adds a paper account line when `--paper` is enabled
 
 **Roadmap**
 - v3 delivery goal: one-click execution via `pmxt`

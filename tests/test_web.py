@@ -218,5 +218,10 @@ def test_dashboard_page():
     resp = client.get("/dashboard")
     assert resp.status_code == 200
     assert "ArbScanner" in resp.text
+    # Paper trading panel markup + API hookup must be present so the dashboard
+    # can surface simulated positions when --paper is enabled.
+    assert 'id="paper-panel"' in resp.text
+    assert "/api/paper/summary" in resp.text
+    assert "Paper Trading Account" in resp.text
 
     app.state.db.close()

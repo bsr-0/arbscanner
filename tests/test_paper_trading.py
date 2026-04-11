@@ -319,3 +319,95 @@ def test_load_opportunity_missing_returns_none():
         conn.close()
         with patch("arbscanner.cli.get_connection", return_value=get_connection(db_path)):
             assert _load_opportunity(999) is None
+
+
+# ---------------------------------------------------------------------------
+# Terminal dashboard integration
+# ---------------------------------------------------------------------------
+
+
+def test_build_caption_without_paper_summary():
+    from arbscanner.dashboard import _build_caption
+
+    caption = _build_caption(
+        opp_count=3,
+        pairs_count=42,
+        last_refresh=datetime(2026, 4, 10, 12, 34, 56, tzinfo=timezone.utc),
+        paper_summary=None,
+    )
+    assert "Matched pairs: 42" in caption
+    assert "Active opps: 3" in caption
+    assert "Paper:" not in caption
+
+
+def test_build_caption_with_paper_summary():
+    from arbscanner.dashboard import _build_caption
+
+    summary = {
+        "balance": 10050.25,
+        "open_positions": 2,
+        "total_trades": 5,
+        "total_pnl": 50.25,
+        "win_rate": 0.60,
+        "avg_pnl_per_trade": 10.05,
+    }
+    caption = _build_caption(
+        opp_count=3,
+        pairs_count=42,
+        last_refresh=datetime(2026, 4, 10, 12, 34, 56, tzinfo=timezone.utc),
+        paper_summary=summary,
+    )
+    assert "Paper:" in caption
+    assert "bal=$10050.25" in caption
+    assert "open=2" in caption
+    assert "trades=5" in caption
+    assert "pnl=$50.25" in caption
+    assert "win=60.0%" in caption
+
+
+def test_build_table_passes_paper_summary():
+    """build_table should accept a paper_summary kwarg and render its caption."""
+    from arbscanner.dashboard import build_table
+
+    summary = {
+        "balance": 9500.0,
+        "open_positions": 1,
+        "total_trades": 3,
+        "total_pnl": -500.0,
+        "win_rate": 0.33,
+        "avg_pnl_per_trade": -166.67,
+    }
+    table = build_table(
+        opportunities=[],
+        matched_pairs_count=10,
+        last_refresh=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        paper_summary=summary,
+    )
+    # Table.caption is a str-ish; coerce to string for the assertion.
+    assert "Paper:" in str(table.caption)
+    assert "bal=$9500.00" in str(table.caption)
+    assert "pnl=$-500.00" in str(table.caption)
+
+
+def test_run_dashboard_invokes_paper_summary_fn():
+    """run_dashboard should call paper_summary_fn each cycle and pass its result."""
+    from unittest.mock import MagicMock
+
+    from arbscanner.dashboard import run_dashboard
+
+    scan_fn = MagicMock(return_value=([], 5))
+    paper_summary_fn = MagicMock(return_value={
+        "balance": 1000.0,
+        "open_positions": 0,
+        "total_trades": 0,
+        "total_pnl": 0.0,
+        "win_rate": 0.0,
+        "avg_pnl_per_trade": 0.0,
+    })
+
+    # After one scan, raise KeyboardInterrupt via sleep to exit the loop.
+    with patch("arbscanner.dashboard.time.sleep", side_effect=KeyboardInterrupt):
+        run_dashboard(scan_fn, interval=1, paper_summary_fn=paper_summary_fn)
+
+    scan_fn.assert_called_once()
+    paper_summary_fn.assert_called_once()

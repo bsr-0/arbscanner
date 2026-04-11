@@ -70,8 +70,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
             _auto_open_paper_positions(paper_engine, opps, paper_threshold)
         return opps, len(cache.pairs)
 
+    paper_summary_fn = paper_engine.summary if paper_engine is not None else None
     try:
-        run_dashboard(do_scan, interval=interval)
+        run_dashboard(do_scan, interval=interval, paper_summary_fn=paper_summary_fn)
     finally:
         db_conn.close()
         if paper_engine is not None:
