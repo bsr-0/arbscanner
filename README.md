@@ -244,8 +244,25 @@ All configuration is driven by environment variables loaded from `.env` (see `.e
 | `STRIPE_WEBHOOK_SECRET` | Optional | Stripe webhook signing secret |
 | `STRIPE_PRICE_ID` | Optional | Stripe price ID for the subscription |
 | `ARBSCANNER_SECRET_KEY` | Recommended | Session secret for the FastAPI web app |
+| `ARBSCANNER_TIER` | Optional | `pro` (default) or `free`. Enforces the landing-page free-tier caps: top 3 opportunities, 5-minute delayed view, no Telegram/Discord alerts, no calibration context. Individual requests can override with an `X-Arbscanner-Tier` header. |
 
 Read-only scanning requires only `ANTHROPIC_API_KEY` (and only for the matching step). Everything else is opt-in.
+
+### Free vs. Pro tier
+
+The landing page advertises a two-tier model (CLAUDE.md Day 10). The operator picks a global default via `ARBSCANNER_TIER`; callers can override per request with the `X-Arbscanner-Tier: free|pro` header (useful for demo deployments that want the dashboard to behave as "pro" for the operator but "free" for anonymous visitors fronted by a reverse proxy that injects the header).
+
+| Feature | Free | Pro |
+|---|---|---|
+| `/api/opportunities` row cap | Top 3 by expected profit | No cap |
+| Visible window | ≥ 5 minutes old | Real-time |
+| Calibration context on each row | Stripped (`null`) | Included |
+| `/api/calibration` | HTTP 402 | Available |
+| Telegram / Discord alerts | Skipped | Delivered |
+| Web dashboard access | ✓ | ✓ |
+| `arbscanner scan` (CLI) | Full (local operator) | Full |
+
+Note: the CLI scanner (`arbscanner scan`) is unaffected by the tier setting — the operator running the scanner locally always gets the full experience. Only the HTTP-facing surfaces (web dashboard and alerts dispatched by the scan loop) observe the tier.
 
 ---
 
@@ -370,6 +387,12 @@ Both planned weeks from the technical plan are complete, plus a round of pipelin
 - `/api/opportunities` joins the matched-pair cache at query time to return calibration inline per row (no SQL migration needed)
 - HTML dashboard has a new Calibration column with Real/Noise badges and tooltip-rendered confidence notes
 - Terminal dashboard adds a Calibration column showing `REAL · politics/30-90d · 5.0pt` style indicators
+
+**Free vs. Pro tier gating** — complete
+- `ARBSCANNER_TIER=free|pro` environment variable or per-request `X-Arbscanner-Tier` header controls tier
+- Free tier caps `/api/opportunities` to top 3 by expected profit, applies a 5-minute delay window, strips calibration context, and returns HTTP 402 on `/api/calibration`
+- Free tier also skips Telegram/Discord alert delivery in `alerts.send_alerts`
+- Pro tier is the default so a fresh self-hosted install keeps the full experience
 
 **Roadmap**
 - v3 delivery goal: one-click execution via `pmxt`

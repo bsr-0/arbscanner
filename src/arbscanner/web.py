@@ -13,7 +13,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from arbscanner.calibration import get_calibration_context, get_historical_edge_stats
-from arbscanner.config import DB_PATH, TEMPLATES_DIR, settings
+from arbscanner.config import (
+    DB_PATH,
+    FREE_ALERT_DELAY_SECONDS,
+    FREE_MAX_OPPORTUNITIES,
+    TEMPLATES_DIR,
+    settings,
+)
 from arbscanner.db import get_connection
 from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
@@ -43,6 +49,20 @@ app.include_router(health_router)
 
 
 # --- JSON API endpoints ---
+
+
+def _get_tier(request: Request) -> str:
+    """Return the requesting tier: 'free' or 'pro'.
+
+    The `X-Arbscanner-Tier` header wins so tests and demo deployments can
+    override the global default without restarting the server. Otherwise we
+    fall back to the `ARBSCANNER_TIER` env var (stored on `settings.tier`).
+    Any value other than ``"free"`` is treated as ``"pro"`` so a typo never
+    accidentally locks out a paying user.
+    """
+    header = request.headers.get("x-arbscanner-tier", "").strip().lower()
+    raw = header or settings.tier
+    return "free" if raw == "free" else "pro"
 
 
 def _build_pair_index() -> dict[str, MatchedPair]:
@@ -103,27 +123,59 @@ def _calibration_for_row(
 
 @app.get("/api/opportunities")
 def get_opportunities(
+    request: Request,
     limit: int = Query(50, ge=1, le=500),
     min_edge: float = Query(0.0, ge=0.0),
     hours: int = Query(24, ge=1, le=168),
 ):
-    """Get recent arb opportunities from the database, enriched with calibration."""
+    """Get recent arb opportunities from the database, enriched with calibration.
+
+    Tier gating (CLAUDE.md Day 10):
+
+    * ``free``: cap results to ``FREE_MAX_OPPORTUNITIES`` (top 3 by expected
+      profit), apply a ``FREE_ALERT_DELAY_SECONDS`` (5-minute) lag on the
+      visible window, and strip calibration context — the landing page sells
+      calibration as a Pro feature.
+    * ``pro``: no gating. Full table, real-time, calibration included.
+    """
+    tier = _get_tier(request)
     conn = app.state.db
+    now = datetime.now(timezone.utc)
     # ISO 8601 strings sort lexicographically when timezone-normalized, so a
     # direct string comparison is correct here.
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    query = """
-        SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
-               direction, gross_edge, net_edge, available_size,
-               expected_profit, poly_price, kalshi_price
-        FROM opportunities
-        WHERE net_edge >= ?
-          AND timestamp >= ?
-        ORDER BY expected_profit DESC
-        LIMIT ?
-    """
-    rows = conn.execute(query, (min_edge, cutoff, limit)).fetchall()
-    pair_index = _build_pair_index()
+    cutoff = (now - timedelta(hours=hours)).isoformat()
+
+    if tier == "free":
+        effective_limit = min(limit, FREE_MAX_OPPORTUNITIES)
+        latest_allowed = (now - timedelta(seconds=FREE_ALERT_DELAY_SECONDS)).isoformat()
+        query = """
+            SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
+                   direction, gross_edge, net_edge, available_size,
+                   expected_profit, poly_price, kalshi_price
+            FROM opportunities
+            WHERE net_edge >= ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY expected_profit DESC
+            LIMIT ?
+        """
+        rows = conn.execute(
+            query, (min_edge, cutoff, latest_allowed, effective_limit)
+        ).fetchall()
+    else:
+        query = """
+            SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
+                   direction, gross_edge, net_edge, available_size,
+                   expected_profit, poly_price, kalshi_price
+            FROM opportunities
+            WHERE net_edge >= ?
+              AND timestamp >= ?
+            ORDER BY expected_profit DESC
+            LIMIT ?
+        """
+        rows = conn.execute(query, (min_edge, cutoff, limit)).fetchall()
+
+    pair_index = _build_pair_index() if tier == "pro" else {}
     return [
         {
             "timestamp": row[0],
@@ -137,8 +189,10 @@ def get_opportunities(
             "expected_profit": row[8],
             "poly_price": row[9],
             "kalshi_price": row[10],
-            "calibration": _calibration_for_row(
-                pair_index, row[1], row[2], row[6]
+            "calibration": (
+                _calibration_for_row(pair_index, row[1], row[2], row[6])
+                if tier == "pro"
+                else None
             ),
         }
         for row in rows
@@ -180,11 +234,22 @@ def get_stats():
 
 @app.get("/api/calibration")
 def get_calibration(
+    request: Request,
     category: str = Query("politics"),
     days_to_resolution: int | None = Query(None),
     net_edge: float = Query(0.01),
 ):
-    """Get calibration context for a hypothetical opportunity."""
+    """Get calibration context for a hypothetical opportunity.
+
+    Gated behind the Pro tier per CLAUDE.md Day 10 (calibration context is
+    explicitly listed as a paid-tier feature on the landing page).
+    """
+    if _get_tier(request) != "pro":
+        raise HTTPException(
+            status_code=402,
+            detail="Calibration context is a Pro feature. Upgrade at /#pricing.",
+        )
+
     resolution_date = None
     if days_to_resolution is not None:
         from datetime import timedelta
