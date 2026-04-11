@@ -198,6 +198,65 @@ uv run arbscanner paper resolve --position-id 7 --outcome yes
 | `--poly-price`, `--kalshi-price` | Mark prices for `close` |
 | `--outcome` | `yes` or `no` for `resolve` |
 
+### `arbscanner execute` — dry-run the execution pipeline
+
+> ⚠️ **Phase A ships dry-run only.** No real orders are placed on either exchange. The full planning, safety-check, two-leg-placement, and partial-fill-unwind pipeline runs as a pure simulation using the current order-book state. Credentials are not consulted. A later Phase A.2 will add a live path behind an explicit opt-in; until then `arbscanner execute` is safe to run against any logged opportunity.
+
+Loads an opportunity from the SQLite log, re-fetches both exchanges' current order books, validates the arb still exists, caps the trade size by both available liquidity and the per-trade USD cap, and runs a two-leg simulated placement. If the second leg simulates a rejection (via `--simulate-leg2-failure`), the pipeline plans and logs a market-order unwind of the first leg at the current best bid. Every outcome is persisted to a new `execution_log` SQLite table.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `opportunity_id` | (required) | ID of the logged opportunity to dry-run |
+| `--max-trade-usd` | `100.0` | Per-trade USD notional cap (sizing floor is applied across liquidity + cap) |
+| `--yes` | off | Skip the interactive "proceed?" confirmation |
+| `--simulate-leg2-failure` | off | Force the Kalshi leg to reject; exercises the unwind path |
+
+```bash
+# Dry-run opportunity #42 under the default $100 cap
+uv run arbscanner execute 42
+
+# Same but non-interactive, tighter cap
+uv run arbscanner execute 42 --yes --max-trade-usd 25
+
+# Exercise the partial-fill recovery path
+uv run arbscanner execute 42 --simulate-leg2-failure --yes
+```
+
+Sample output:
+
+```
+Execution report (DRY RUN — no real orders placed)
+============================================================
+  Opportunity ID:       42
+  Market:               Will the Fed cut rates in June?
+  Direction:            poly_yes_kalshi_no
+  Current poly ask:     0.4200
+  Current kalshi ask:   0.4400
+  Per-contract cost:    0.8600
+  Per-contract fees:    0.0358
+  Per-contract net:     0.1042
+  Size:                 80.00 contracts
+  Total cost:           $68.80
+  Total fees:           $2.87
+  Expected net profit:  $8.34
+  Per-trade USD cap:    $100.00
+
+  Leg 1 (polymarket):   FILLED  filled=80.00 @ 0.4200  fee=$0.0336
+  Leg 2 (kalshi):       FILLED  filled=80.00 @ 0.4400  fee=$2.8000
+
+  Result:               SUCCESS
+  Final realized PnL:   $8.3400
+```
+
+**Safety model** (from the Phase A design decisions):
+
+- **Dry-run only** — `arbscanner.execution.EXECUTION_MODE == "dry_run"` is a module constant with a test that asserts it. Flipping it is a conscious opt-in, not a runtime override.
+- **Per-trade USD cap** hard defaulted to $100. Overridable per call via `--max-trade-usd`.
+- **Integer contract rounding** — size is floored to whole contracts since Kalshi trades in integers. Sub-dollar caps are rejected with `insufficient_liquidity`.
+- **Stale arb detection** — if the re-fetched order books no longer show a positive net edge, the plan is rejected with `status="stale"` and no simulated orders are placed.
+- **Partial-fill unwind** — if leg 2 fails, leg 1 is immediately unwound at the current best bid (or entry − $0.01 fallback). Realized slippage is logged.
+- **CLI-only trigger** — no HTTP execution endpoint, no auto-trigger from the scan loop in Phase A.
+
 ### `arbscanner backtest` — replay the opportunity log
 
 Replays every logged opportunity against historical resolved-market outcomes (ingested by `arbscanner calibrate --ingest-live` or `--ingest-url`) and reports realized PnL, win rate, and a per-category breakdown. Uses the paper trading engine under the hood with an isolated temp-file SQLite DB, so your live `paper_positions` table is never touched.
@@ -363,6 +422,7 @@ Note: the CLI scanner (`arbscanner scan`) is unaffected by the tier setting — 
 | `arbscanner.db` | SQLite opportunity log |
 | `arbscanner.paper_trading` | Simulated execution account for expected-vs-realized edge tracking |
 | `arbscanner.backtest` | Replay the opportunity log against resolved-market outcomes and report realized PnL |
+| `arbscanner.execution` | Dry-run execution pipeline: planning, safety checks, two-leg simulation, partial-fill unwind, audit log |
 
 ---
 
@@ -447,8 +507,15 @@ Both planned weeks from the technical plan are complete, plus a round of pipelin
 - Reports realized PnL, win rate, initial / final balance, and a per-category breakdown pulled from the matched-pair cache
 - Completes the CLAUDE.md Day 5 "log historical opportunities to SQLite for backtesting later" deliverable
 
+**Execution pipeline (Phase A, dry-run)** — complete
+- `arbscanner execute <opportunity_id>` runs the full plan → two-leg placement → partial-fill unwind pipeline as a pure simulation. No real orders, no credentials required.
+- `plan_execution` re-fetches current order books, caps sizing by `$100` default per-trade USD notional, rejects stale arbs, and floors to integer contracts (Kalshi constraint).
+- `execute_plan` simulates both legs and falls through to a market-order unwind of leg 1 on leg-2 rejection. Exercised via `--simulate-leg2-failure`.
+- Every execution attempt is audited in a new `execution_log` SQLite table alongside the opportunity log.
+- `arbscanner.execution.EXECUTION_MODE == "dry_run"` is an invariant with a test; flipping it is a conscious Phase A.2 decision.
+
 **Roadmap**
-- v3 delivery goal: one-click execution via `pmxt`
+- Phase A.2: live execution (real `pmxt.*.create_order` calls, credentials, kill switch, production safety review)
 - Broader exchange coverage (Limitless, PredictIt)
 - Per-user alert thresholds and portfolio-aware sizing
 

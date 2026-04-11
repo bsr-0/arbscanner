@@ -381,6 +381,118 @@ def _print_paper_positions(engine, status: str) -> None:
         console.print(line)
 
 
+def cmd_execute(args: argparse.Namespace) -> None:
+    """Run the dry-run execution pipeline against a logged opportunity.
+
+    Phase A ships dry-run only: the full planning + simulation + unwind
+    pipeline runs without ever calling ``pmxt.*.create_order``. No
+    credentials are required and no financial risk is taken. Live execution
+    is a deliberately separate Phase A.2.
+    """
+    from arbscanner.execution import (
+        EXECUTION_MODE,
+        PlanRejection,
+        execute_plan,
+        format_execution_report,
+        get_connection as get_exec_connection,
+        log_execution,
+        plan_execution,
+    )
+    from arbscanner.matcher import load_cache
+
+    if EXECUTION_MODE != "dry_run":
+        console.print("[red]Execution module is not in dry-run mode. Aborting.[/red]")
+        sys.exit(1)
+
+    opp = _load_opportunity(args.opportunity_id)
+    if opp is None:
+        console.print(
+            f"[red]No logged opportunity with id={args.opportunity_id}[/red]"
+        )
+        sys.exit(1)
+
+    # Look up the pair so we can pass outcome IDs into the planner.
+    cache = load_cache()
+    pair = None
+    for p in cache.pairs:
+        if (
+            p.poly_market_id == opp.poly_market_id
+            and p.kalshi_market_id == opp.kalshi_market_id
+        ):
+            pair = p
+            break
+    if pair is None:
+        console.print(
+            f"[yellow]Matched-pair cache has no entry for "
+            f"{opp.poly_market_id}::{opp.kalshi_market_id}. "
+            f"Run `arbscanner match` to refresh.[/yellow]"
+        )
+
+    console.print(
+        f"[bold]Planning dry-run execution for opportunity #{args.opportunity_id}[/bold]"
+    )
+    console.print(f"  Market: {opp.poly_title}")
+    console.print(f"  Direction: {opp.direction}")
+    console.print(f"  Logged prices: poly={opp.poly_price:.3f} kalshi={opp.kalshi_price:.3f}")
+    console.print("  Re-fetching current order books...")
+
+    poly_exchange, kalshi_exchange = create_exchanges()
+
+    plan_or_rejection = plan_execution(
+        opp,
+        poly_exchange,
+        kalshi_exchange,
+        pair,
+        max_trade_usd=args.max_trade_usd,
+        opportunity_id=args.opportunity_id,
+    )
+
+    if isinstance(plan_or_rejection, PlanRejection):
+        console.print(
+            f"[red]Plan rejected ({plan_or_rejection.status}):[/red] "
+            f"{plan_or_rejection.reason}"
+        )
+        sys.exit(1)
+
+    plan = plan_or_rejection
+    console.print(
+        f"\n[bold]Plan ready[/bold] "
+        f"(size={plan.size:.2f}, cost=${plan.total_cost_usd:.2f}, "
+        f"expected profit=${plan.expected_net_profit:.2f})"
+    )
+
+    if not args.yes:
+        console.print(
+            "\n[bold yellow]About to run dry-run simulation. "
+            "No real orders will be placed.[/bold yellow]"
+        )
+        confirm = input("Proceed? [y/N]: ").strip().lower()
+        if confirm not in ("y", "yes"):
+            console.print("[dim]Aborted by user.[/dim]")
+            return
+
+    result = execute_plan(
+        plan,
+        poly_exchange=poly_exchange,
+        kalshi_exchange=kalshi_exchange,
+        simulate_leg2_failure=args.simulate_leg2_failure,
+    )
+
+    console.print()
+    console.print(format_execution_report(result))
+
+    # Persist to execution_log (same SQLite DB as opportunities).
+    conn = get_exec_connection()
+    try:
+        row_id = log_execution(conn, result)
+        console.print(f"\n[dim]Logged as execution_log.id={row_id}[/dim]")
+    finally:
+        conn.close()
+
+    if result.result not in ("success",):
+        sys.exit(1)
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Replay logged opportunities against historical resolved-market outcomes."""
     from datetime import datetime
@@ -590,6 +702,33 @@ def main() -> None:
         help="Market outcome for `resolve`",
     )
 
+    # execute command
+    execute_parser = subparsers.add_parser(
+        "execute",
+        help="Dry-run the execution pipeline against a logged opportunity",
+    )
+    execute_parser.add_argument(
+        "opportunity_id",
+        type=int,
+        help="ID of the logged opportunity to dry-run execute",
+    )
+    execute_parser.add_argument(
+        "--max-trade-usd",
+        type=float,
+        default=100.0,
+        help="Per-trade USD notional cap (default: 100.0)",
+    )
+    execute_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive 'proceed?' confirmation",
+    )
+    execute_parser.add_argument(
+        "--simulate-leg2-failure",
+        action="store_true",
+        help="Force the second leg to reject (exercises the unwind path)",
+    )
+
     # backtest command
     backtest_parser = subparsers.add_parser(
         "backtest",
@@ -650,6 +789,7 @@ def main() -> None:
         "backup": cmd_backup,
         "paper": cmd_paper,
         "backtest": cmd_backtest,
+        "execute": cmd_execute,
     }
     commands[args.command](args)
 
