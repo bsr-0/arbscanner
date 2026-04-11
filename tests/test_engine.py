@@ -192,3 +192,53 @@ def test_both_directions():
     directions = {o.direction for o in opps}
     assert "poly_yes_kalshi_no" in directions
     assert "poly_no_kalshi_yes" in directions
+
+
+def test_opportunity_calibration_populated_when_metadata_present():
+    """Engine should attach a calibration dict when the pair has metadata."""
+    from datetime import datetime, timedelta, timezone
+
+    future = (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()
+    pair = _make_pair(category="politics", resolution_date=future)
+    books = _books(
+        py1=MockOrderBook(bids=[], asks=[MockOrderLevel(0.40, 100)]),
+        kn1=MockOrderBook(bids=[], asks=[MockOrderLevel(0.45, 50)]),
+    )
+    opps = calculate_arb(pair, books)
+    assert len(opps) == 1
+    opp = opps[0]
+    assert opp.category == "politics"
+    assert opp.resolution_date == future
+    assert opp.calibration is not None
+    assert opp.calibration["category"] == "politics"
+    # 60 days out lands in the "30-90" bucket by days_to_bucket.
+    assert opp.calibration["time_bucket"] == "30-90"
+    assert "confidence_note" in opp.calibration
+    assert "edge_likely_real" in opp.calibration
+
+
+def test_opportunity_calibration_none_when_no_metadata():
+    """Engine should gracefully return calibration=None when metadata missing."""
+    pair = _make_pair(category="", resolution_date="")
+    books = _books(
+        py1=MockOrderBook(bids=[], asks=[MockOrderLevel(0.40, 100)]),
+        kn1=MockOrderBook(bids=[], asks=[MockOrderLevel(0.45, 50)]),
+    )
+    opps = calculate_arb(pair, books)
+    assert len(opps) == 1
+    assert opps[0].calibration is None
+
+
+def test_opportunity_calibration_handles_malformed_resolution_date():
+    """A bad ISO timestamp should not block arb detection."""
+    pair = _make_pair(category="sports", resolution_date="not-a-date")
+    books = _books(
+        py1=MockOrderBook(bids=[], asks=[MockOrderLevel(0.40, 100)]),
+        kn1=MockOrderBook(bids=[], asks=[MockOrderLevel(0.45, 50)]),
+    )
+    opps = calculate_arb(pair, books)
+    assert len(opps) == 1
+    # Calibration should still be computed using just the category; the
+    # malformed date falls through to `resolution_date=None` in the lookup.
+    assert opps[0].calibration is not None
+    assert opps[0].calibration["category"] == "sports"

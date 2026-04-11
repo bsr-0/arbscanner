@@ -29,6 +29,10 @@
         .calibration { font-size: 11px; color: #8b949e; margin-top: 4px; }
         .calibration.real { color: #3fb950; }
         .calibration.noise { color: #d29922; }
+        .calib-badge { display: inline-block; font-size: 10px; padding: 2px 6px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; white-space: nowrap; cursor: help; }
+        .calib-badge.real { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.4); }
+        .calib-badge.noise { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.4); }
+        .calib-badge.unknown { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
         .refresh-bar { position: fixed; bottom: 0; left: 0; right: 0; height: 3px; background: #21262d; }
         .refresh-bar .progress { height: 100%; background: #58a6ff; transition: width 1s linear; }
         .empty { text-align: center; padding: 48px; color: #484f58; }
@@ -124,6 +128,7 @@
                     <th>Net Edge</th>
                     <th>Size</th>
                     <th>$ Profit</th>
+                    <th>Calibration</th>
                     <th>Time</th>
                 </tr>
             </thead>
@@ -146,6 +151,30 @@
 
         function formatDirection(d) {
             return d === 'poly_yes_kalshi_no' ? 'P.Yes + K.No' : 'P.No + K.Yes';
+        }
+
+        function escapeAttr(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
+        function renderCalibrationBadge(cal) {
+            if (!cal) {
+                return '<span class="calib-badge unknown" title="No calibration context — matched pair is missing category or resolution date">?</span>';
+            }
+            const klass = cal.edge_likely_real ? 'real' : 'noise';
+            const label = cal.edge_likely_real ? 'Real' : 'Noise';
+            const category = cal.category || 'other';
+            const bucket = cal.time_bucket || '';
+            const avg = Number(cal.avg_mispricing || 0).toFixed(1);
+            const note = cal.confidence_note || '';
+            const short = `${category} · ${bucket}d · avg ${avg}pt`;
+            const tooltip = escapeAttr(note);
+            return `<span class="calib-badge ${klass}" title="${tooltip}">${label} · ${escapeAttr(short)}</span>`;
         }
 
         function formatTime(ts) {
@@ -232,6 +261,7 @@
                         <td class="${edgeClass(o.net_edge)}">${(o.net_edge * 100).toFixed(1)}%</td>
                         <td>${o.available_size.toFixed(0)}</td>
                         <td class="${edgeClass(o.net_edge)}">$${o.expected_profit.toFixed(2)}</td>
+                        <td>${renderCalibrationBadge(o.calibration)}</td>
                         <td class="dim">${formatTime(o.timestamp)}</td>
                     </tr>
                 `).join('');

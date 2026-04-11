@@ -57,6 +57,77 @@ def test_get_opportunities():
         assert len(data) == 1
         assert data[0]["market_title"] == "Test Market"
         assert data[0]["net_edge"] == 0.10
+        # Calibration key is always present in the response payload, even when
+        # the pair cache has no matching entry.
+        assert "calibration" in data[0]
+        conn.close()
+
+
+def test_get_opportunities_enriched_with_calibration():
+    """When the matched-pair cache carries category + resolution_date,
+    /api/opportunities should join it onto each row as a calibration dict."""
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from arbscanner.models import MatchedPair, MatchedPairsCache
+
+    app = _get_test_app()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = get_connection(db_path)
+        log_opportunities(conn, [_make_opp(net_edge=0.08)])
+        app.state.db = conn
+        app.state.start_time = 0
+
+        future = (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()
+        mock_cache = MatchedPairsCache(
+            pairs=[
+                MatchedPair(
+                    poly_market_id="poly_1",
+                    poly_title="Test Market",
+                    kalshi_market_id="kalshi_1",
+                    kalshi_title="KX-TEST",
+                    confidence=0.95,
+                    source="embedding",
+                    matched_at="2026-04-10T00:00:00Z",
+                    category="politics",
+                    resolution_date=future,
+                )
+            ],
+        )
+
+        with patch("arbscanner.web.load_cache", return_value=mock_cache):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/opportunities?hours=24&min_edge=0")
+            data = resp.json()
+            assert len(data) == 1
+            cal = data[0]["calibration"]
+            assert cal is not None
+            assert cal["category"] == "politics"
+            assert cal["time_bucket"] == "30-90"
+            assert "edge_likely_real" in cal
+            assert "confidence_note" in cal
+
+        conn.close()
+
+
+def test_get_opportunities_calibration_none_for_unknown_pair():
+    """A logged opportunity whose pair is no longer in the cache should get
+    calibration=None instead of raising."""
+    app = _get_test_app()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = get_connection(db_path)
+        log_opportunities(conn, [_make_opp()])
+        app.state.db = conn
+        app.state.start_time = 0
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/opportunities?hours=24&min_edge=0")
+        data = resp.json()
+        assert data[0]["calibration"] is None
         conn.close()
 
 
@@ -223,5 +294,10 @@ def test_dashboard_page():
     assert 'id="paper-panel"' in resp.text
     assert "/api/paper/summary" in resp.text
     assert "Paper Trading Account" in resp.text
+    # Calibration column + badge renderer must be wired into the row JS so
+    # the moat is visible next to every opportunity.
+    assert "<th>Calibration</th>" in resp.text
+    assert "renderCalibrationBadge" in resp.text
+    assert "calib-badge" in resp.text
 
     app.state.db.close()

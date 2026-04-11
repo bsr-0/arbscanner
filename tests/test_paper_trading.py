@@ -411,3 +411,70 @@ def test_run_dashboard_invokes_paper_summary_fn():
 
     scan_fn.assert_called_once()
     paper_summary_fn.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Terminal calibration indicator
+# ---------------------------------------------------------------------------
+
+
+def test_format_calibration_unknown():
+    from arbscanner.dashboard import _format_calibration
+
+    text = _format_calibration(None)
+    assert "unknown" in str(text)
+
+
+def test_format_calibration_real_edge():
+    from arbscanner.dashboard import _format_calibration
+
+    text = _format_calibration({
+        "category": "politics",
+        "time_bucket": "30-90",
+        "avg_mispricing": 5.0,
+        "edge_likely_real": True,
+    })
+    rendered = str(text)
+    assert "REAL" in rendered
+    assert "politics/30-90d" in rendered
+    assert "5.0pt" in rendered
+
+
+def test_format_calibration_noise_edge():
+    from arbscanner.dashboard import _format_calibration
+
+    text = _format_calibration({
+        "category": "economics",
+        "time_bucket": "0-7",
+        "avg_mispricing": 2.0,
+        "edge_likely_real": False,
+    })
+    rendered = str(text)
+    assert "noise" in rendered
+    assert "economics/0-7d" in rendered
+
+
+def test_build_table_includes_calibration_column():
+    """The terminal table should render a Calibration column with opp metadata."""
+    from arbscanner.dashboard import build_table
+
+    opp = _make_opp(
+        category="politics",
+        resolution_date="2026-06-15T00:00:00Z",
+        calibration={
+            "category": "politics",
+            "days_to_resolution": 60,
+            "time_bucket": "30-90",
+            "avg_mispricing": 5.0,
+            "edge_likely_real": True,
+            "confidence_note": "likely real",
+        },
+    )
+    table = build_table(
+        opportunities=[opp],
+        matched_pairs_count=1,
+        last_refresh=datetime(2026, 4, 10, tzinfo=timezone.utc),
+    )
+    # Rich.Table stores columns in order; the last column should be Calibration.
+    column_headers = [c.header for c in table.columns]
+    assert column_headers[-1] == "Calibration"

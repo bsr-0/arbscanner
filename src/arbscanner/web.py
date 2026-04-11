@@ -17,6 +17,7 @@ from arbscanner.config import DB_PATH, TEMPLATES_DIR, settings
 from arbscanner.db import get_connection
 from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
+from arbscanner.models import MatchedPair
 from arbscanner.paper_trading import PaperPosition, PaperTradingEngine
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,69 @@ app.include_router(health_router)
 # --- JSON API endpoints ---
 
 
+def _build_pair_index() -> dict[str, MatchedPair]:
+    """Return a {poly_id::kalshi_id -> MatchedPair} index of the current cache.
+
+    This is the join key used to attach per-opportunity calibration context
+    from the JSON pair cache without touching the SQLite opportunities schema.
+    """
+    cache = load_cache()
+    return {f"{p.poly_market_id}::{p.kalshi_market_id}": p for p in cache.pairs}
+
+
+def _calibration_for_row(
+    pair_index: dict[str, MatchedPair],
+    poly_market_id: str,
+    kalshi_market_id: str,
+    net_edge: float,
+) -> dict | None:
+    """Look up calibration context for a logged opportunity row.
+
+    Returns ``None`` when no matching pair is known or the pair lacks
+    calibration metadata.
+    """
+    pair = pair_index.get(f"{poly_market_id}::{kalshi_market_id}")
+    if pair is None or (not pair.category and not pair.resolution_date):
+        return None
+
+    resolution_date = None
+    if pair.resolution_date:
+        try:
+            resolution_date = datetime.fromisoformat(
+                pair.resolution_date.replace("Z", "+00:00")
+            )
+        except ValueError:
+            resolution_date = None
+
+    try:
+        ctx = get_calibration_context(
+            pair.category or None, resolution_date, net_edge
+        )
+    except Exception:
+        logger.debug(
+            "Calibration lookup failed for pair %s/%s",
+            poly_market_id,
+            kalshi_market_id,
+        )
+        return None
+
+    return {
+        "category": ctx.category,
+        "days_to_resolution": ctx.days_to_resolution,
+        "time_bucket": ctx.time_bucket,
+        "avg_mispricing": ctx.avg_mispricing,
+        "edge_likely_real": ctx.edge_likely_real,
+        "confidence_note": ctx.confidence_note,
+    }
+
+
 @app.get("/api/opportunities")
 def get_opportunities(
     limit: int = Query(50, ge=1, le=500),
     min_edge: float = Query(0.0, ge=0.0),
     hours: int = Query(24, ge=1, le=168),
 ):
-    """Get recent arb opportunities from the database."""
+    """Get recent arb opportunities from the database, enriched with calibration."""
     conn = app.state.db
     # ISO 8601 strings sort lexicographically when timezone-normalized, so a
     # direct string comparison is correct here.
@@ -66,6 +123,7 @@ def get_opportunities(
         LIMIT ?
     """
     rows = conn.execute(query, (min_edge, cutoff, limit)).fetchall()
+    pair_index = _build_pair_index()
     return [
         {
             "timestamp": row[0],
@@ -79,6 +137,9 @@ def get_opportunities(
             "expected_profit": row[8],
             "poly_price": row[9],
             "kalshi_price": row[10],
+            "calibration": _calibration_for_row(
+                pair_index, row[1], row[2], row[6]
+            ),
         }
         for row in rows
     ]

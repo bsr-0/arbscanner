@@ -89,3 +89,122 @@ def test_load_cache_missing_file():
     cache = load_cache(Path("/nonexistent/path.json"))
     assert len(cache.pairs) == 0
     assert len(cache.rejected) == 0
+
+
+def test_load_cache_backward_compat_missing_calibration_fields():
+    """Pre-calibration cache entries should still load with default values."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "old.json"
+        # Simulate a cache file written before the category/resolution_date
+        # fields existed. The loader should tolerate the missing keys.
+        old_payload = {
+            "version": 1,
+            "updated_at": "2026-04-10T00:00:00Z",
+            "pairs": [
+                {
+                    "poly_market_id": "p1",
+                    "poly_title": "Will X?",
+                    "kalshi_market_id": "k1",
+                    "kalshi_title": "KX-EVENT",
+                    "confidence": 0.92,
+                    "source": "embedding+llm",
+                    "matched_at": "2026-04-10T00:00:00Z",
+                    "poly_yes_outcome_id": "py1",
+                    "poly_no_outcome_id": "pn1",
+                    "kalshi_yes_outcome_id": "ky1",
+                    "kalshi_no_outcome_id": "kn1",
+                }
+            ],
+            "rejected": [],
+        }
+        path.write_text(json.dumps(old_payload))
+        loaded = load_cache(path)
+        assert len(loaded.pairs) == 1
+        assert loaded.pairs[0].category == ""
+        assert loaded.pairs[0].resolution_date == ""
+
+
+def test_load_cache_tolerates_unknown_keys():
+    """Forward compat: unknown keys in the pair dict should be silently dropped."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "newer.json"
+        payload = {
+            "version": 1,
+            "updated_at": "2026-04-10T00:00:00Z",
+            "pairs": [
+                {
+                    "poly_market_id": "p1",
+                    "poly_title": "Will X?",
+                    "kalshi_market_id": "k1",
+                    "kalshi_title": "KX-EVENT",
+                    "confidence": 0.92,
+                    "source": "embedding+llm",
+                    "matched_at": "2026-04-10T00:00:00Z",
+                    "category": "politics",
+                    "resolution_date": "2026-06-15T00:00:00Z",
+                    # Hypothetical future field a newer version of arbscanner added.
+                    "unknown_future_field": {"anything": [1, 2, 3]},
+                }
+            ],
+            "rejected": [],
+        }
+        path.write_text(json.dumps(payload))
+        loaded = load_cache(path)
+        assert len(loaded.pairs) == 1
+        assert loaded.pairs[0].category == "politics"
+        assert loaded.pairs[0].resolution_date == "2026-06-15T00:00:00Z"
+
+
+def test_candidate_to_matched_pair_carries_calibration_metadata():
+    """Matcher conversion should propagate category + resolution_date."""
+    from arbscanner.matcher import candidate_to_matched_pair
+    from arbscanner.models import CandidatePair
+
+    candidate = CandidatePair(
+        poly_market_id="p1",
+        poly_title="Will the Fed cut rates?",
+        poly_description="",
+        poly_resolution_date="2026-06-15T00:00:00Z",
+        poly_yes_outcome_id="py1",
+        poly_no_outcome_id="pn1",
+        kalshi_market_id="k1",
+        kalshi_title="KXFEDCUT-26JUN",
+        kalshi_description="",
+        kalshi_resolution_date="2026-06-20T00:00:00Z",
+        kalshi_yes_outcome_id="ky1",
+        kalshi_no_outcome_id="kn1",
+        similarity=0.95,
+        poly_category="Economics",
+        kalshi_category="",
+    )
+    pair = candidate_to_matched_pair(candidate, source="embedding")
+    assert pair.category == "Economics"
+    # Polymarket resolution_date wins when present.
+    assert pair.resolution_date == "2026-06-15T00:00:00Z"
+
+
+def test_candidate_to_matched_pair_prefers_non_empty_category():
+    """If poly category is empty, we fall back to the kalshi category."""
+    from arbscanner.matcher import candidate_to_matched_pair
+    from arbscanner.models import CandidatePair
+
+    candidate = CandidatePair(
+        poly_market_id="p1",
+        poly_title="x",
+        poly_description="",
+        poly_resolution_date="",
+        poly_yes_outcome_id="py",
+        poly_no_outcome_id="pn",
+        kalshi_market_id="k1",
+        kalshi_title="KX",
+        kalshi_description="",
+        kalshi_resolution_date="2026-06-20T00:00:00Z",
+        kalshi_yes_outcome_id="ky",
+        kalshi_no_outcome_id="kn",
+        similarity=0.9,
+        poly_category="",
+        kalshi_category="sports",
+    )
+    pair = candidate_to_matched_pair(candidate, source="embedding")
+    assert pair.category == "sports"
+    assert pair.resolution_date == "2026-06-20T00:00:00Z"

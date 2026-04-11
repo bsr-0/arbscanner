@@ -19,7 +19,7 @@ Every candidate opportunity is scored against a historical calibration layer der
 - **Telegram + Discord webhooks** for real-time alerts when edge crosses a threshold
 - **SQLite opportunity log** for historical analysis and backtesting
 - **Paper trading simulator** that auto-opens simulated positions on high-edge opportunities, tracks expected-vs-realized edge, and exposes a CLI + JSON API for the account
-- **Calibration layer** powered by Jon Becker's historical dataset (Parquet) or live resolved-market ingestion
+- **Calibration layer** powered by Jon Becker's historical dataset (Parquet) or live resolved-market ingestion, joined inline to every detected opportunity (terminal + web + `/api/opportunities`) so users can see "edge likely real" vs. "likely noise" at a glance
 - **Parallel order-book fetches** with configurable worker pool for fast scans across hundreds of pairs
 - **Stripe-ready** landing page for the paid tier (optional)
 
@@ -363,6 +363,13 @@ Both planned weeks from the technical plan are complete, plus a round of pipelin
 - `/api/paper/*` JSON endpoints for dashboards and scripts
 - Web dashboard shows a live Paper Trading Account panel (balance, open positions, P&L, win rate) as soon as the engine has any activity
 - Terminal dashboard caption adds a paper account line when `--paper` is enabled
+
+**Calibration-aware edge scoring** — complete
+- Matcher now persists `category` and `resolution_date` alongside each matched pair (backward compatible with old `matched_pairs.json` files)
+- The engine attaches a calibration context to every detected opportunity (bucketed mispricing baseline, "edge likely real" flag, and a human-readable note)
+- `/api/opportunities` joins the matched-pair cache at query time to return calibration inline per row (no SQL migration needed)
+- HTML dashboard has a new Calibration column with Real/Noise badges and tooltip-rendered confidence notes
+- Terminal dashboard adds a Calibration column showing `REAL · politics/30-90d · 5.0pt` style indicators
 
 **Roadmap**
 - v3 delivery goal: one-click execution via `pmxt`

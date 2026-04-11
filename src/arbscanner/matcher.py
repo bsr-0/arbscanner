@@ -111,6 +111,8 @@ def compute_candidate_pairs(
                         kalshi_yes_outcome_id=km.yes.outcome_id if km.yes else "",
                         kalshi_no_outcome_id=km.no.outcome_id if km.no else "",
                         similarity=sim,
+                        poly_category=getattr(pm, "category", "") or "",
+                        kalshi_category=getattr(km, "category", "") or "",
                     )
                 )
 
@@ -210,7 +212,17 @@ Only output the JSON array, nothing else."""
 
 
 def candidate_to_matched_pair(candidate: CandidatePair, source: str) -> MatchedPair:
-    """Convert a confirmed candidate to a MatchedPair."""
+    """Convert a confirmed candidate to a MatchedPair.
+
+    Carries calibration metadata (category + resolution_date) through so the
+    engine can score every opportunity against the historical calibration
+    curves without re-fetching market metadata at scan time. Category is
+    taken from whichever side reports a non-empty value; resolution_date
+    prefers the Polymarket side since Kalshi's tickers are often closer to
+    the notional close time.
+    """
+    category = candidate.poly_category or candidate.kalshi_category or ""
+    resolution_date = candidate.poly_resolution_date or candidate.kalshi_resolution_date or ""
     return MatchedPair(
         poly_market_id=candidate.poly_market_id,
         poly_title=candidate.poly_title,
@@ -223,7 +235,24 @@ def candidate_to_matched_pair(candidate: CandidatePair, source: str) -> MatchedP
         poly_no_outcome_id=candidate.poly_no_outcome_id,
         kalshi_yes_outcome_id=candidate.kalshi_yes_outcome_id,
         kalshi_no_outcome_id=candidate.kalshi_no_outcome_id,
+        category=category,
+        resolution_date=resolution_date,
     )
+
+
+_MATCHED_PAIR_FIELDS = {f.name for f in MatchedPair.__dataclass_fields__.values()}
+
+
+def _dict_to_matched_pair(p: dict) -> MatchedPair:
+    """Build a MatchedPair from a dict, tolerating missing or extra keys.
+
+    Missing fields fall back to dataclass defaults (so older cache files
+    pre-dating the calibration fields still load). Unknown keys are silently
+    dropped so a cache written by a newer version of arbscanner doesn't
+    explode older deployments.
+    """
+    filtered = {k: v for k, v in p.items() if k in _MATCHED_PAIR_FIELDS}
+    return MatchedPair(**filtered)
 
 
 def load_cache(path: Path | None = None) -> MatchedPairsCache:
@@ -233,7 +262,7 @@ def load_cache(path: Path | None = None) -> MatchedPairsCache:
         return MatchedPairsCache()
     try:
         data = json.loads(path.read_text())
-        pairs = [MatchedPair(**p) for p in data.get("pairs", [])]
+        pairs = [_dict_to_matched_pair(p) for p in data.get("pairs", [])]
         return MatchedPairsCache(
             version=data.get("version", 1),
             updated_at=data.get("updated_at", ""),
@@ -266,6 +295,8 @@ def save_cache(cache: MatchedPairsCache, path: Path | None = None) -> None:
                 "poly_no_outcome_id": p.poly_no_outcome_id,
                 "kalshi_yes_outcome_id": p.kalshi_yes_outcome_id,
                 "kalshi_no_outcome_id": p.kalshi_no_outcome_id,
+                "category": p.category,
+                "resolution_date": p.resolution_date,
             }
             for p in cache.pairs
         ],

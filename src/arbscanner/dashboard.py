@@ -34,6 +34,7 @@ def build_table(
     table.add_column("Net Edge", justify="right")
     table.add_column("Size", justify="right")
     table.add_column("$ Profit", justify="right")
+    table.add_column("Calibration")
 
     for opp in opportunities:
         # Truncate title for display
@@ -55,15 +56,28 @@ def build_table(
             Text(f"{opp.net_edge:.1%}", style=net_style),
             f"{opp.available_size:.0f}",
             Text(f"${opp.expected_profit:.2f}", style=net_style),
+            _format_calibration(opp.calibration),
         )
 
     if not opportunities:
         table.add_row(
-            "No opportunities found", "", "", "", "", "", "", "",
+            "No opportunities found", "", "", "", "", "", "", "", "",
             style="dim",
         )
 
     return table
+
+
+def _format_calibration(cal: dict | None) -> Text:
+    """Render a compact calibration indicator for the terminal table."""
+    if not cal:
+        return Text("? unknown", style="dim")
+    label = "REAL" if cal.get("edge_likely_real") else "noise"
+    style = "bold green" if cal.get("edge_likely_real") else "yellow"
+    category = cal.get("category", "?")
+    bucket = cal.get("time_bucket", "?")
+    avg = float(cal.get("avg_mispricing") or 0.0)
+    return Text(f"{label} · {category}/{bucket}d · {avg:.1f}pt", style=style)
 
 
 def _build_caption(
