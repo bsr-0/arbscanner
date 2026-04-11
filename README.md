@@ -198,6 +198,52 @@ uv run arbscanner paper resolve --position-id 7 --outcome yes
 | `--poly-price`, `--kalshi-price` | Mark prices for `close` |
 | `--outcome` | `yes` or `no` for `resolve` |
 
+### `arbscanner backtest` — replay the opportunity log
+
+Replays every logged opportunity against historical resolved-market outcomes (ingested by `arbscanner calibrate --ingest-live` or `--ingest-url`) and reports realized PnL, win rate, and a per-category breakdown. Uses the paper trading engine under the hood with an isolated temp-file SQLite DB, so your live `paper_positions` table is never touched.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--start` | none | ISO 8601 timestamp — only replay opportunities on or after this |
+| `--end` | none | ISO 8601 timestamp — only replay opportunities strictly before this |
+| `--min-edge` | `0.0` | Floor on `net_edge` — ignore logged opportunities below this |
+| `--initial-balance` | `10000` | Starting paper balance for the replay |
+
+```bash
+# Backtest everything in the log
+uv run arbscanner backtest
+
+# Only replay the past week, ignoring anything below 2% net edge
+uv run arbscanner backtest --start 2026-04-04 --min-edge 0.02
+```
+
+Typical output:
+
+```
+Backtest results
+============================================================
+  Logged opportunities:     142
+  Resolved (replayed):      89
+  Unresolved (skipped):     52
+  Disagreement (skipped):   1
+
+  Initial balance:          $10000.00
+  Final balance:            $10423.50
+  Realized PnL:             $423.50
+  Wins / Losses:            89 / 0
+  Win rate:                 100.0%
+  Avg PnL / trade:          $4.76
+
+  By category:
+    Category          Trades   Wins     Win%    Total PnL
+    ---------------- ------- ------ -------- ------------
+    economics              18      18  100.0% $    195.00
+    politics               22      22  100.0% $     82.00
+    sports                 49      49  100.0% $    146.50
+```
+
+**Key property:** on genuinely locked-in arbs, realized PnL equals `gross_edge × size` regardless of which side of the market wins — `backtest` confirms the scanner's detected edge survives to resolution. Run `arbscanner calibrate --ingest-live --limit 1000` first to populate `historical_polymarket.parquet` / `historical_kalshi.parquet` so opportunities have resolutions to join against.
+
 ### `arbscanner calibrate` — calibration data
 
 Computes, ingests, or views the calibration layer.
@@ -316,6 +362,7 @@ Note: the CLI scanner (`arbscanner scan`) is unaffected by the tier setting — 
 | `arbscanner.calibration` | Historical dataset ingestion and curve computation |
 | `arbscanner.db` | SQLite opportunity log |
 | `arbscanner.paper_trading` | Simulated execution account for expected-vs-realized edge tracking |
+| `arbscanner.backtest` | Replay the opportunity log against resolved-market outcomes and report realized PnL |
 
 ---
 
@@ -393,6 +440,12 @@ Both planned weeks from the technical plan are complete, plus a round of pipelin
 - Free tier caps `/api/opportunities` to top 3 by expected profit, applies a 5-minute delay window, strips calibration context, and returns HTTP 402 on `/api/calibration`
 - Free tier also skips Telegram/Discord alert delivery in `alerts.send_alerts`
 - Pro tier is the default so a fresh self-hosted install keeps the full experience
+
+**Backtest harness** — complete
+- `arbscanner backtest` replays every logged opportunity against the resolved-market Parquet files ingested by the calibration module
+- Uses the paper trading engine with an isolated temp-file SQLite DB so the live `paper_positions` table is never polluted
+- Reports realized PnL, win rate, initial / final balance, and a per-category breakdown pulled from the matched-pair cache
+- Completes the CLAUDE.md Day 5 "log historical opportunities to SQLite for backtesting later" deliverable
 
 **Roadmap**
 - v3 delivery goal: one-click execution via `pmxt`

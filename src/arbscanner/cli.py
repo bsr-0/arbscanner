@@ -381,6 +381,40 @@ def _print_paper_positions(engine, status: str) -> None:
         console.print(line)
 
 
+def cmd_backtest(args: argparse.Namespace) -> None:
+    """Replay logged opportunities against historical resolved-market outcomes."""
+    from datetime import datetime
+
+    from arbscanner.backtest import format_backtest_report, run_backtest
+
+    start = datetime.fromisoformat(args.start) if args.start else None
+    end = datetime.fromisoformat(args.end) if args.end else None
+
+    console.print(
+        "[bold]Running backtest[/bold] "
+        f"(min_edge={args.min_edge:.1%}, initial_balance=${args.initial_balance:.2f})..."
+    )
+
+    result = run_backtest(
+        start=start,
+        end=end,
+        min_edge=args.min_edge,
+        initial_balance=args.initial_balance,
+    )
+
+    console.print(format_backtest_report(result))
+
+    if result.total_opportunities == 0:
+        console.print(
+            "\n[yellow]No opportunities in the log. Run 'arbscanner scan' first.[/yellow]"
+        )
+    elif result.resolved == 0:
+        console.print(
+            "\n[yellow]No opportunities could be resolved against ingested markets. "
+            "Run 'arbscanner calibrate --ingest-live' to populate resolutions.[/yellow]"
+        )
+
+
 def cmd_backup(args: argparse.Namespace) -> None:
     """Backup, restore, list, or prune the SQLite database."""
     from pathlib import Path
@@ -556,6 +590,32 @@ def main() -> None:
         help="Market outcome for `resolve`",
     )
 
+    # backtest command
+    backtest_parser = subparsers.add_parser(
+        "backtest",
+        help="Replay logged opportunities against historical resolved outcomes",
+    )
+    backtest_parser.add_argument(
+        "--start",
+        help="ISO 8601 timestamp — only replay opportunities on or after this",
+    )
+    backtest_parser.add_argument(
+        "--end",
+        help="ISO 8601 timestamp — only replay opportunities strictly before this",
+    )
+    backtest_parser.add_argument(
+        "--min-edge",
+        type=float,
+        default=0.0,
+        help="Floor on net_edge: ignore opportunities below this (default: 0.0)",
+    )
+    backtest_parser.add_argument(
+        "--initial-balance",
+        type=float,
+        default=10000.0,
+        help="Starting paper balance for the replay (default: 10000)",
+    )
+
     # backup command
     backup_parser = subparsers.add_parser(
         "backup", help="Database backup, restore, list, prune"
@@ -589,6 +649,7 @@ def main() -> None:
         "calibrate": cmd_calibrate,
         "backup": cmd_backup,
         "paper": cmd_paper,
+        "backtest": cmd_backtest,
     }
     commands[args.command](args)
 
