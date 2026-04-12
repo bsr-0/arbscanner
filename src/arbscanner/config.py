@@ -53,6 +53,18 @@ class Settings:
         default_factory=lambda: os.getenv("ARBSCANNER_SECRET_KEY", "dev-secret-key")
     )
 
+    # Free/Pro tier gating (CLAUDE.md Day 10 — Free: top 3 opps, 5-min
+    # delayed alerts; Pro: real-time, full table, calibration context,
+    # Telegram alerts). Default is "pro" so a fresh self-hosted checkout
+    # sees everything; set ARBSCANNER_TIER=free on demo deployments to
+    # enforce the free-tier caps described on the landing page.
+    tier: str = field(default_factory=lambda: os.getenv("ARBSCANNER_TIER", "pro").lower())
+
+
+# Free-tier constants from the CLAUDE.md Day 10 spec.
+FREE_MAX_OPPORTUNITIES: int = 3
+FREE_ALERT_DELAY_SECONDS: int = 300  # 5-minute lag on what free users can see
+
 
 # Kalshi exact bracket-based fee schedule (per contract, symmetric around 50c).
 # Each entry: (price_low, price_high, fee_cents).

@@ -63,14 +63,26 @@ def send_alerts(
     opportunities: list[ArbOpportunity],
     threshold: float | None = None,
     dedup: bool = True,
+    tier: str | None = None,
 ) -> int:
     """Send alerts for opportunities above the alert threshold.
 
     Deduplicates repeat alerts via the module-level AlertDeduper unless
     `dedup=False` is passed (useful for tests).
 
+    Tier gating (CLAUDE.md Day 10): Telegram / Discord alerts are an
+    explicit Pro-tier feature. Under the ``free`` tier we skip delivery
+    entirely and return ``0`` — the free tier's 5-minute delayed view on
+    ``/api/opportunities`` is their only alert surface.
+
     Returns the number of alerts successfully sent.
     """
+    if tier is None:
+        tier = settings.tier
+    if tier.lower() == "free":
+        logger.debug("Skipping %d alert(s): free tier does not receive push alerts", len(opportunities))
+        return 0
+
     if threshold is None:
         threshold = settings.alert_threshold
 

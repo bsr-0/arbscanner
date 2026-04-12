@@ -110,3 +110,45 @@ def test_send_alerts_dedup_suppresses_repeat():
 
     assert first == 1
     assert second == 0  # deduped
+
+
+def test_send_alerts_free_tier_skipped():
+    """Free tier skips Telegram/Discord delivery entirely (CLAUDE.md Day 10)."""
+    opp = _make_opp(net_edge=0.10, poly_market_id="free_p", kalshi_market_id="free_k")
+    mock_tg = MagicMock(return_value=True)
+    mock_dc = MagicMock(return_value=True)
+
+    with patch("arbscanner.alerts.settings") as mock_settings, \
+         patch("arbscanner.alerts.send_telegram", mock_tg), \
+         patch("arbscanner.alerts.send_discord", mock_dc):
+        mock_settings.telegram_bot_token = "fake-token"
+        mock_settings.discord_webhook_url = "https://discord.com/webhook"
+        mock_settings.alert_threshold = 0.02
+        mock_settings.tier = "free"
+
+        count = send_alerts([opp], threshold=0.02, dedup=False)
+
+    assert count == 0
+    mock_tg.assert_not_called()
+    mock_dc.assert_not_called()
+
+
+def test_send_alerts_pro_tier_delivers():
+    """Pro tier (explicit param) still delivers."""
+    from arbscanner.alerts import _deduper
+
+    _deduper._entries.clear()  # type: ignore[attr-defined]
+
+    opp = _make_opp(net_edge=0.10, poly_market_id="pro_p", kalshi_market_id="pro_k")
+    with patch("arbscanner.alerts.settings") as mock_settings, \
+         patch("arbscanner.alerts.send_telegram", return_value=True) as mock_tg:
+        mock_settings.telegram_bot_token = "fake-token"
+        mock_settings.discord_webhook_url = ""
+        mock_settings.alert_threshold = 0.02
+        mock_settings.tier = "free"  # global default is free…
+
+        # …but the explicit `tier="pro"` override wins for this call.
+        count = send_alerts([opp], threshold=0.02, dedup=False, tier="pro")
+
+    assert count == 1
+    mock_tg.assert_called_once()

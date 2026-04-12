@@ -22,6 +22,13 @@ class MatchedPair:
     kalshi_yes_outcome_id: str = ""
     kalshi_no_outcome_id: str = ""
 
+    # Calibration metadata (optional — enables the calibration layer to score
+    # edges without re-fetching market metadata at scan time). Both fields
+    # default to empty so older cache files that predate the calibration
+    # integration still round-trip through load_cache / save_cache.
+    category: str = ""
+    resolution_date: str = ""  # ISO 8601, empty when unknown
+
 
 @dataclass
 class MatchedPairsCache:
@@ -50,6 +57,8 @@ class CandidatePair:
     kalshi_yes_outcome_id: str
     kalshi_no_outcome_id: str
     similarity: float
+    poly_category: str = ""
+    kalshi_category: str = ""
 
 
 @dataclass
@@ -68,3 +77,10 @@ class ArbOpportunity:
     available_size: float  # min liquidity on both sides (contracts)
     expected_profit: float  # net_edge * available_size
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # Calibration metadata (runtime-only enrichment; not persisted in the
+    # opportunities SQLite log). Populated by the engine from the matched
+    # pair's category + resolution_date at scan time.
+    category: str = ""
+    resolution_date: str = ""  # ISO 8601, empty when unknown
+    calibration: dict | None = None  # CalibrationContext serialized as a dict

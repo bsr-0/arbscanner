@@ -18,7 +18,8 @@ Every candidate opportunity is scored against a historical calibration layer der
 - **FastAPI web dashboard** with a live-updating HTML table and JSON API
 - **Telegram + Discord webhooks** for real-time alerts when edge crosses a threshold
 - **SQLite opportunity log** for historical analysis and backtesting
-- **Calibration layer** powered by Jon Becker's historical dataset (Parquet) or live resolved-market ingestion
+- **Paper trading simulator** that auto-opens simulated positions on high-edge opportunities, tracks expected-vs-realized edge, and exposes a CLI + JSON API for the account
+- **Calibration layer** powered by Jon Becker's historical dataset (Parquet) or live resolved-market ingestion, joined inline to every detected opportunity (terminal + web + `/api/opportunities`) so users can see "edge likely real" vs. "likely noise" at a glance
 - **Parallel order-book fetches** with configurable worker pool for fast scans across hundreds of pairs
 - **Stripe-ready** landing page for the paid tier (optional)
 
@@ -109,10 +110,16 @@ Runs the matching pipeline (if no cache exists), then continuously scans every m
 | `--interval` | `30` | Seconds between refreshes |
 | `--threshold` | `0.01` | Minimum net edge (1%) for an opportunity to appear |
 | `--max-workers` | from settings | Parallel workers for order-book fetches |
+| `--paper` | off | Auto-open simulated paper trading positions for every new high-edge opportunity |
+| `--paper-balance` | `10000` | Starting balance for the paper trading account (first run only) |
+| `--paper-threshold` | `0.02` | Minimum net edge required to auto-open a paper position |
 
 ```bash
 # Aggressive: 10s refresh, show everything above 0.5% net edge, 16 workers
 uv run arbscanner scan --interval 10 --threshold 0.005 --max-workers 16
+
+# Same, but also simulate trades at 2%+ net edge with a $25k starting bankroll
+uv run arbscanner scan --paper --paper-balance 25000 --paper-threshold 0.02
 ```
 
 ### `arbscanner match` — build the matched-pair map
@@ -156,6 +163,145 @@ uv run arbscanner serve --host 0.0.0.0 --port 8000
 # Development with hot reload
 uv run arbscanner serve --reload
 ```
+
+### `arbscanner paper` — paper trading account
+
+Manage a simulated execution account populated either by `scan --paper` or by
+manually opening positions from logged opportunities. Positions are persisted
+to a dedicated `paper_positions` table in the scanner SQLite DB, so account
+state survives restarts.
+
+```bash
+# Aggregate account summary (balance, PnL, win rate)
+uv run arbscanner paper summary
+
+# List all positions, only open, or only closed
+uv run arbscanner paper list --status open
+
+# Open a position from a logged opportunity row (see /api/opportunities for ids)
+uv run arbscanner paper open --opportunity-id 42 --size 50
+
+# Mark-to-market close at supplied prices
+uv run arbscanner paper close --position-id 7 --poly-price 0.55 --kalshi-price 0.40
+
+# Close at final resolution — "yes" or "no" is the market outcome
+uv run arbscanner paper resolve --position-id 7 --outcome yes
+```
+
+| Flag | Description |
+|------|-------------|
+| `--balance` | Starting balance (first run only, default 10000) |
+| `--status` | Filter for `list`: `open` / `closed` / `all` (default `all`) |
+| `--opportunity-id` | Logged opportunity ID for `open` |
+| `--size` | Override size (contracts) for `open` |
+| `--position-id` | Paper position ID for `close` / `resolve` |
+| `--poly-price`, `--kalshi-price` | Mark prices for `close` |
+| `--outcome` | `yes` or `no` for `resolve` |
+
+### `arbscanner execute` — dry-run the execution pipeline
+
+> ⚠️ **Phase A ships dry-run only.** No real orders are placed on either exchange. The full planning, safety-check, two-leg-placement, and partial-fill-unwind pipeline runs as a pure simulation using the current order-book state. Credentials are not consulted. A later Phase A.2 will add a live path behind an explicit opt-in; until then `arbscanner execute` is safe to run against any logged opportunity.
+
+Loads an opportunity from the SQLite log, re-fetches both exchanges' current order books, validates the arb still exists, caps the trade size by both available liquidity and the per-trade USD cap, and runs a two-leg simulated placement. If the second leg simulates a rejection (via `--simulate-leg2-failure`), the pipeline plans and logs a market-order unwind of the first leg at the current best bid. Every outcome is persisted to a new `execution_log` SQLite table.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `opportunity_id` | (required) | ID of the logged opportunity to dry-run |
+| `--max-trade-usd` | `100.0` | Per-trade USD notional cap (sizing floor is applied across liquidity + cap) |
+| `--yes` | off | Skip the interactive "proceed?" confirmation |
+| `--simulate-leg2-failure` | off | Force the Kalshi leg to reject; exercises the unwind path |
+
+```bash
+# Dry-run opportunity #42 under the default $100 cap
+uv run arbscanner execute 42
+
+# Same but non-interactive, tighter cap
+uv run arbscanner execute 42 --yes --max-trade-usd 25
+
+# Exercise the partial-fill recovery path
+uv run arbscanner execute 42 --simulate-leg2-failure --yes
+```
+
+Sample output:
+
+```
+Execution report (DRY RUN — no real orders placed)
+============================================================
+  Opportunity ID:       42
+  Market:               Will the Fed cut rates in June?
+  Direction:            poly_yes_kalshi_no
+  Current poly ask:     0.4200
+  Current kalshi ask:   0.4400
+  Per-contract cost:    0.8600
+  Per-contract fees:    0.0358
+  Per-contract net:     0.1042
+  Size:                 80.00 contracts
+  Total cost:           $68.80
+  Total fees:           $2.87
+  Expected net profit:  $8.34
+  Per-trade USD cap:    $100.00
+
+  Leg 1 (polymarket):   FILLED  filled=80.00 @ 0.4200  fee=$0.0336
+  Leg 2 (kalshi):       FILLED  filled=80.00 @ 0.4400  fee=$2.8000
+
+  Result:               SUCCESS
+  Final realized PnL:   $8.3400
+```
+
+**Safety model** (from the Phase A design decisions):
+
+- **Dry-run only** — `arbscanner.execution.EXECUTION_MODE == "dry_run"` is a module constant with a test that asserts it. Flipping it is a conscious opt-in, not a runtime override.
+- **Per-trade USD cap** hard defaulted to $100. Overridable per call via `--max-trade-usd`.
+- **Integer contract rounding** — size is floored to whole contracts since Kalshi trades in integers. Sub-dollar caps are rejected with `insufficient_liquidity`.
+- **Stale arb detection** — if the re-fetched order books no longer show a positive net edge, the plan is rejected with `status="stale"` and no simulated orders are placed.
+- **Partial-fill unwind** — if leg 2 fails, leg 1 is immediately unwound at the current best bid (or entry − $0.01 fallback). Realized slippage is logged.
+- **CLI-only trigger** — no HTTP execution endpoint, no auto-trigger from the scan loop in Phase A.
+
+### `arbscanner backtest` — replay the opportunity log
+
+Replays every logged opportunity against historical resolved-market outcomes (ingested by `arbscanner calibrate --ingest-live` or `--ingest-url`) and reports realized PnL, win rate, and a per-category breakdown. Uses the paper trading engine under the hood with an isolated temp-file SQLite DB, so your live `paper_positions` table is never touched.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--start` | none | ISO 8601 timestamp — only replay opportunities on or after this |
+| `--end` | none | ISO 8601 timestamp — only replay opportunities strictly before this |
+| `--min-edge` | `0.0` | Floor on `net_edge` — ignore logged opportunities below this |
+| `--initial-balance` | `10000` | Starting paper balance for the replay |
+
+```bash
+# Backtest everything in the log
+uv run arbscanner backtest
+
+# Only replay the past week, ignoring anything below 2% net edge
+uv run arbscanner backtest --start 2026-04-04 --min-edge 0.02
+```
+
+Typical output:
+
+```
+Backtest results
+============================================================
+  Logged opportunities:     142
+  Resolved (replayed):      89
+  Unresolved (skipped):     52
+  Disagreement (skipped):   1
+
+  Initial balance:          $10000.00
+  Final balance:            $10423.50
+  Realized PnL:             $423.50
+  Wins / Losses:            89 / 0
+  Win rate:                 100.0%
+  Avg PnL / trade:          $4.76
+
+  By category:
+    Category          Trades   Wins     Win%    Total PnL
+    ---------------- ------- ------ -------- ------------
+    economics              18      18  100.0% $    195.00
+    politics               22      22  100.0% $     82.00
+    sports                 49      49  100.0% $    146.50
+```
+
+**Key property:** on genuinely locked-in arbs, realized PnL equals `gross_edge × size` regardless of which side of the market wins — `backtest` confirms the scanner's detected edge survives to resolution. Run `arbscanner calibrate --ingest-live --limit 1000` first to populate `historical_polymarket.parquet` / `historical_kalshi.parquet` so opportunities have resolutions to join against.
 
 ### `arbscanner calibrate` — calibration data
 
@@ -203,8 +349,25 @@ All configuration is driven by environment variables loaded from `.env` (see `.e
 | `STRIPE_WEBHOOK_SECRET` | Optional | Stripe webhook signing secret |
 | `STRIPE_PRICE_ID` | Optional | Stripe price ID for the subscription |
 | `ARBSCANNER_SECRET_KEY` | Recommended | Session secret for the FastAPI web app |
+| `ARBSCANNER_TIER` | Optional | `pro` (default) or `free`. Enforces the landing-page free-tier caps: top 3 opportunities, 5-minute delayed view, no Telegram/Discord alerts, no calibration context. Individual requests can override with an `X-Arbscanner-Tier` header. |
 
 Read-only scanning requires only `ANTHROPIC_API_KEY` (and only for the matching step). Everything else is opt-in.
+
+### Free vs. Pro tier
+
+The landing page advertises a two-tier model (CLAUDE.md Day 10). The operator picks a global default via `ARBSCANNER_TIER`; callers can override per request with the `X-Arbscanner-Tier: free|pro` header (useful for demo deployments that want the dashboard to behave as "pro" for the operator but "free" for anonymous visitors fronted by a reverse proxy that injects the header).
+
+| Feature | Free | Pro |
+|---|---|---|
+| `/api/opportunities` row cap | Top 3 by expected profit | No cap |
+| Visible window | ≥ 5 minutes old | Real-time |
+| Calibration context on each row | Stripped (`null`) | Included |
+| `/api/calibration` | HTTP 402 | Available |
+| Telegram / Discord alerts | Skipped | Delivered |
+| Web dashboard access | ✓ | ✓ |
+| `arbscanner scan` (CLI) | Full (local operator) | Full |
+
+Note: the CLI scanner (`arbscanner scan`) is unaffected by the tier setting — the operator running the scanner locally always gets the full experience. Only the HTTP-facing surfaces (web dashboard and alerts dispatched by the scan loop) observe the tier.
 
 ---
 
@@ -257,6 +420,9 @@ Read-only scanning requires only `ANTHROPIC_API_KEY` (and only for the matching 
 | `arbscanner.alerts` | Telegram + Discord webhook dispatch |
 | `arbscanner.calibration` | Historical dataset ingestion and curve computation |
 | `arbscanner.db` | SQLite opportunity log |
+| `arbscanner.paper_trading` | Simulated execution account for expected-vs-realized edge tracking |
+| `arbscanner.backtest` | Replay the opportunity log against resolved-market outcomes and report realized PnL |
+| `arbscanner.execution` | Dry-run execution pipeline: planning, safety checks, two-leg simulation, partial-fill unwind, audit log |
 
 ---
 
@@ -272,6 +438,10 @@ Start the server with `uv run arbscanner serve` and browse to the endpoints belo
 | `/api/stats` | GET | Aggregate scanner stats (pair count, last scan time, edge histogram) |
 | `/api/calibration` | GET | Calibration curves by category × time-to-resolution |
 | `/api/pairs` | GET | Every matched pair with confidence and source |
+| `/api/paper/summary` | GET | Paper trading account summary |
+| `/api/paper/positions` | GET | Paper positions (`?status=open\|closed\|all`) |
+| `/api/paper/positions/{id}/close` | POST | Mark-to-market close: `{poly_price, kalshi_price}` |
+| `/api/paper/positions/{id}/resolve` | POST | Resolve at outcome: `{yes_won: true\|false}` |
 
 The JSON endpoints are public by default and safe to poll from external tools or scripts. If you're exposing the server beyond localhost, put it behind a reverse proxy and set `ARBSCANNER_SECRET_KEY` to something long and random.
 
@@ -310,8 +480,42 @@ Both planned weeks from the technical plan are complete, plus a round of pipelin
 - `calibrate --ingest-live` for on-demand historical ingestion straight from the exchanges
 - Aggregate edge statistics surfaced via `arbscanner calibrate` and `/api/stats`
 
+**Paper trading simulator** — complete
+- Persistent `paper_positions` SQLite table with open/close/resolve lifecycle
+- `arbscanner scan --paper` auto-opens simulated positions on new high-edge opportunities (with pair+direction dedup)
+- `arbscanner paper {summary, list, open, close, resolve}` CLI
+- `/api/paper/*` JSON endpoints for dashboards and scripts
+- Web dashboard shows a live Paper Trading Account panel (balance, open positions, P&L, win rate) as soon as the engine has any activity
+- Terminal dashboard caption adds a paper account line when `--paper` is enabled
+
+**Calibration-aware edge scoring** — complete
+- Matcher now persists `category` and `resolution_date` alongside each matched pair (backward compatible with old `matched_pairs.json` files)
+- The engine attaches a calibration context to every detected opportunity (bucketed mispricing baseline, "edge likely real" flag, and a human-readable note)
+- `/api/opportunities` joins the matched-pair cache at query time to return calibration inline per row (no SQL migration needed)
+- HTML dashboard has a new Calibration column with Real/Noise badges and tooltip-rendered confidence notes
+- Terminal dashboard adds a Calibration column showing `REAL · politics/30-90d · 5.0pt` style indicators
+
+**Free vs. Pro tier gating** — complete
+- `ARBSCANNER_TIER=free|pro` environment variable or per-request `X-Arbscanner-Tier` header controls tier
+- Free tier caps `/api/opportunities` to top 3 by expected profit, applies a 5-minute delay window, strips calibration context, and returns HTTP 402 on `/api/calibration`
+- Free tier also skips Telegram/Discord alert delivery in `alerts.send_alerts`
+- Pro tier is the default so a fresh self-hosted install keeps the full experience
+
+**Backtest harness** — complete
+- `arbscanner backtest` replays every logged opportunity against the resolved-market Parquet files ingested by the calibration module
+- Uses the paper trading engine with an isolated temp-file SQLite DB so the live `paper_positions` table is never polluted
+- Reports realized PnL, win rate, initial / final balance, and a per-category breakdown pulled from the matched-pair cache
+- Completes the CLAUDE.md Day 5 "log historical opportunities to SQLite for backtesting later" deliverable
+
+**Execution pipeline (Phase A, dry-run)** — complete
+- `arbscanner execute <opportunity_id>` runs the full plan → two-leg placement → partial-fill unwind pipeline as a pure simulation. No real orders, no credentials required.
+- `plan_execution` re-fetches current order books, caps sizing by `$100` default per-trade USD notional, rejects stale arbs, and floors to integer contracts (Kalshi constraint).
+- `execute_plan` simulates both legs and falls through to a market-order unwind of leg 1 on leg-2 rejection. Exercised via `--simulate-leg2-failure`.
+- Every execution attempt is audited in a new `execution_log` SQLite table alongside the opportunity log.
+- `arbscanner.execution.EXECUTION_MODE == "dry_run"` is an invariant with a test; flipping it is a conscious Phase A.2 decision.
+
 **Roadmap**
-- v3 delivery goal: one-click execution via `pmxt`
+- Phase A.2: live execution (real `pmxt.*.create_order` calls, credentials, kill switch, production safety review)
 - Broader exchange coverage (Limitless, PredictIt)
 - Per-user alert thresholds and portfolio-aware sizing
 

@@ -4,6 +4,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+from arbscanner.calibration import CalibrationContext, get_calibration_context
 from arbscanner.config import kalshi_fee, poly_fee, settings
 from arbscanner.exchanges import fetch_order_book_safe
 from arbscanner.metrics import (
@@ -17,6 +18,45 @@ from arbscanner.metrics import (
 from arbscanner.models import ArbOpportunity, MatchedPair
 
 logger = logging.getLogger(__name__)
+
+
+def _calibration_for(pair: MatchedPair, net_edge: float) -> dict | None:
+    """Compute calibration context for an opportunity on this pair.
+
+    Returns a dict (as emitted by CalibrationContext.__dict__) or None if the
+    pair lacks the metadata needed to score it. Errors in the calibration
+    lookup are swallowed and logged — we never want a bad calibration lookup
+    to block arb detection.
+    """
+    if not pair.category and not pair.resolution_date:
+        return None
+    resolution_date: datetime | None = None
+    if pair.resolution_date:
+        try:
+            resolution_date = datetime.fromisoformat(
+                pair.resolution_date.replace("Z", "+00:00")
+            )
+        except ValueError:
+            logger.debug(
+                "Unable to parse resolution_date %r for pair %s",
+                pair.resolution_date,
+                pair.poly_market_id,
+            )
+    try:
+        ctx: CalibrationContext = get_calibration_context(
+            pair.category or None, resolution_date, net_edge
+        )
+    except Exception:
+        logger.exception("Calibration lookup failed for pair %s", pair.poly_market_id)
+        return None
+    return {
+        "category": ctx.category,
+        "days_to_resolution": ctx.days_to_resolution,
+        "time_bucket": ctx.time_bucket,
+        "avg_mispricing": ctx.avg_mispricing,
+        "edge_likely_real": ctx.edge_likely_real,
+        "confidence_note": ctx.confidence_note,
+    }
 
 
 def calculate_arb(
@@ -71,6 +111,9 @@ def calculate_arb(
                         available_size=size,
                         expected_profit=net * size,
                         timestamp=now,
+                        category=pair.category,
+                        resolution_date=pair.resolution_date,
+                        calibration=_calibration_for(pair, net),
                     )
                 )
 
@@ -102,6 +145,9 @@ def calculate_arb(
                         available_size=size,
                         expected_profit=net * size,
                         timestamp=now,
+                        category=pair.category,
+                        resolution_date=pair.resolution_date,
+                        calibration=_calibration_for(pair, net),
                     )
                 )
 

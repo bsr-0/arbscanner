@@ -15,11 +15,14 @@ def build_table(
     opportunities: list[ArbOpportunity],
     matched_pairs_count: int,
     last_refresh: datetime | None = None,
+    paper_summary: dict | None = None,
 ) -> Table:
     """Build a Rich table displaying current arb opportunities."""
     table = Table(
         title="Arb Scanner",
-        caption=_build_caption(len(opportunities), matched_pairs_count, last_refresh),
+        caption=_build_caption(
+            len(opportunities), matched_pairs_count, last_refresh, paper_summary
+        ),
         show_lines=True,
     )
 
@@ -31,6 +34,7 @@ def build_table(
     table.add_column("Net Edge", justify="right")
     table.add_column("Size", justify="right")
     table.add_column("$ Profit", justify="right")
+    table.add_column("Calibration")
 
     for opp in opportunities:
         # Truncate title for display
@@ -52,33 +56,64 @@ def build_table(
             Text(f"{opp.net_edge:.1%}", style=net_style),
             f"{opp.available_size:.0f}",
             Text(f"${opp.expected_profit:.2f}", style=net_style),
+            _format_calibration(opp.calibration),
         )
 
     if not opportunities:
         table.add_row(
-            "No opportunities found", "", "", "", "", "", "", "",
+            "No opportunities found", "", "", "", "", "", "", "", "",
             style="dim",
         )
 
     return table
 
 
+def _format_calibration(cal: dict | None) -> Text:
+    """Render a compact calibration indicator for the terminal table."""
+    if not cal:
+        return Text("? unknown", style="dim")
+    label = "REAL" if cal.get("edge_likely_real") else "noise"
+    style = "bold green" if cal.get("edge_likely_real") else "yellow"
+    category = cal.get("category", "?")
+    bucket = cal.get("time_bucket", "?")
+    avg = float(cal.get("avg_mispricing") or 0.0)
+    return Text(f"{label} · {category}/{bucket}d · {avg:.1f}pt", style=style)
+
+
 def _build_caption(
-    opp_count: int, pairs_count: int, last_refresh: datetime | None
+    opp_count: int,
+    pairs_count: int,
+    last_refresh: datetime | None,
+    paper_summary: dict | None = None,
 ) -> str:
     """Build the table caption with stats."""
     refresh_str = last_refresh.strftime("%H:%M:%S UTC") if last_refresh else "never"
-    return (
+    caption = (
         f"Matched pairs: {pairs_count} | "
         f"Active opps: {opp_count} | "
         f"Last refresh: {refresh_str}"
     )
+    if paper_summary is not None:
+        caption += (
+            f"\nPaper: bal=${paper_summary.get('balance', 0):.2f} "
+            f"open={paper_summary.get('open_positions', 0)} "
+            f"trades={paper_summary.get('total_trades', 0)} "
+            f"pnl=${paper_summary.get('total_pnl', 0):.2f} "
+            f"win={paper_summary.get('win_rate', 0) * 100:.1f}%"
+        )
+    return caption
 
 
-def run_dashboard(scan_fn, interval: int = 30) -> None:
+def run_dashboard(
+    scan_fn,
+    interval: int = 30,
+    paper_summary_fn=None,
+) -> None:
     """Run the live dashboard, calling scan_fn() every interval seconds.
 
     scan_fn should return (opportunities, matched_pairs_count).
+    paper_summary_fn, if provided, should return a paper trading summary dict
+    (as produced by PaperTradingEngine.summary) to render in the caption.
     """
     console = Console()
 
@@ -90,7 +125,8 @@ def run_dashboard(scan_fn, interval: int = 30) -> None:
             try:
                 opportunities, pairs_count = scan_fn()
                 now = datetime.now(timezone.utc)
-                table = build_table(opportunities, pairs_count, now)
+                paper_summary = paper_summary_fn() if paper_summary_fn else None
+                table = build_table(opportunities, pairs_count, now, paper_summary)
                 live.update(table)
                 time.sleep(interval)
             except KeyboardInterrupt:

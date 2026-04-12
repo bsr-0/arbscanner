@@ -14,11 +14,18 @@ from pydantic import BaseModel, Field
 
 from arbscanner.backtest import compute_backtest_report
 from arbscanner.calibration import get_calibration_context, get_historical_edge_stats
-from arbscanner.config import DB_PATH, TEMPLATES_DIR, settings
+from arbscanner.config import (
+    DB_PATH,
+    FREE_ALERT_DELAY_SECONDS,
+    FREE_MAX_OPPORTUNITIES,
+    TEMPLATES_DIR,
+    settings,
+)
 from arbscanner.db import get_connection, get_opportunity_by_id
 from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
-from arbscanner.paper_trading import PaperTradingEngine
+from arbscanner.models import MatchedPair
+from arbscanner.paper_trading import PaperPosition, PaperTradingEngine
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +38,11 @@ async def lifespan(app: FastAPI):
     if settings.stripe_secret_key:
         stripe.api_key = settings.stripe_secret_key
     app.state.db = get_connection()
-    app.state.paper = PaperTradingEngine()
+    app.state.paper_engine = PaperTradingEngine()
     app.state.start_time = time.time()
     yield
     app.state.db.close()
+    app.state.paper_engine.close()
 
 
 app = FastAPI(title="ArbScanner", version="0.2.0", lifespan=lifespan)
@@ -44,28 +52,131 @@ app.include_router(health_router)
 # --- JSON API endpoints ---
 
 
+def _get_tier(request: Request) -> str:
+    """Return the requesting tier: 'free' or 'pro'.
+
+    The `X-Arbscanner-Tier` header wins so tests and demo deployments can
+    override the global default without restarting the server. Otherwise we
+    fall back to the `ARBSCANNER_TIER` env var (stored on `settings.tier`).
+    Any value other than ``"free"`` is treated as ``"pro"`` so a typo never
+    accidentally locks out a paying user.
+    """
+    header = request.headers.get("x-arbscanner-tier", "").strip().lower()
+    raw = header or settings.tier
+    return "free" if raw == "free" else "pro"
+
+
+def _build_pair_index() -> dict[str, MatchedPair]:
+    """Return a {poly_id::kalshi_id -> MatchedPair} index of the current cache.
+
+    This is the join key used to attach per-opportunity calibration context
+    from the JSON pair cache without touching the SQLite opportunities schema.
+    """
+    cache = load_cache()
+    return {f"{p.poly_market_id}::{p.kalshi_market_id}": p for p in cache.pairs}
+
+
+def _calibration_for_row(
+    pair_index: dict[str, MatchedPair],
+    poly_market_id: str,
+    kalshi_market_id: str,
+    net_edge: float,
+) -> dict | None:
+    """Look up calibration context for a logged opportunity row.
+
+    Returns ``None`` when no matching pair is known or the pair lacks
+    calibration metadata.
+    """
+    pair = pair_index.get(f"{poly_market_id}::{kalshi_market_id}")
+    if pair is None or (not pair.category and not pair.resolution_date):
+        return None
+
+    resolution_date = None
+    if pair.resolution_date:
+        try:
+            resolution_date = datetime.fromisoformat(
+                pair.resolution_date.replace("Z", "+00:00")
+            )
+        except ValueError:
+            resolution_date = None
+
+    try:
+        ctx = get_calibration_context(
+            pair.category or None, resolution_date, net_edge
+        )
+    except Exception:
+        logger.debug(
+            "Calibration lookup failed for pair %s/%s",
+            poly_market_id,
+            kalshi_market_id,
+        )
+        return None
+
+    return {
+        "category": ctx.category,
+        "days_to_resolution": ctx.days_to_resolution,
+        "time_bucket": ctx.time_bucket,
+        "avg_mispricing": ctx.avg_mispricing,
+        "edge_likely_real": ctx.edge_likely_real,
+        "confidence_note": ctx.confidence_note,
+    }
+
+
 @app.get("/api/opportunities")
 def get_opportunities(
+    request: Request,
     limit: int = Query(50, ge=1, le=500),
     min_edge: float = Query(0.0, ge=0.0),
     hours: int = Query(24, ge=1, le=168),
 ):
-    """Get recent arb opportunities from the database."""
+    """Get recent arb opportunities from the database, enriched with calibration.
+
+    Tier gating (CLAUDE.md Day 10):
+
+    * ``free``: cap results to ``FREE_MAX_OPPORTUNITIES`` (top 3 by expected
+      profit), apply a ``FREE_ALERT_DELAY_SECONDS`` (5-minute) lag on the
+      visible window, and strip calibration context — the landing page sells
+      calibration as a Pro feature.
+    * ``pro``: no gating. Full table, real-time, calibration included.
+    """
+    tier = _get_tier(request)
     conn = app.state.db
+    now = datetime.now(timezone.utc)
     # ISO 8601 strings sort lexicographically when timezone-normalized, so a
     # direct string comparison is correct here.
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    query = """
-        SELECT id, timestamp, poly_market_id, kalshi_market_id, market_title,
-               direction, gross_edge, net_edge, available_size,
-               expected_profit, poly_price, kalshi_price
-        FROM opportunities
-        WHERE net_edge >= ?
-          AND timestamp >= ?
-        ORDER BY expected_profit DESC
-        LIMIT ?
-    """
-    rows = conn.execute(query, (min_edge, cutoff, limit)).fetchall()
+    cutoff = (now - timedelta(hours=hours)).isoformat()
+
+    if tier == "free":
+        effective_limit = min(limit, FREE_MAX_OPPORTUNITIES)
+        latest_allowed = (now - timedelta(seconds=FREE_ALERT_DELAY_SECONDS)).isoformat()
+        query = """
+            SELECT id, timestamp, poly_market_id, kalshi_market_id, market_title,
+                   direction, gross_edge, net_edge, available_size,
+                   expected_profit, poly_price, kalshi_price
+            FROM opportunities
+            WHERE net_edge >= ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY expected_profit DESC
+            LIMIT ?
+        """
+        rows = conn.execute(
+            query, (min_edge, cutoff, latest_allowed, effective_limit)
+        ).fetchall()
+    else:
+        query = """
+            SELECT id, timestamp, poly_market_id, kalshi_market_id, market_title,
+                   direction, gross_edge, net_edge, available_size,
+                   expected_profit, poly_price, kalshi_price
+            FROM opportunities
+            WHERE net_edge >= ?
+              AND timestamp >= ?
+            ORDER BY expected_profit DESC
+            LIMIT ?
+        """
+        rows = conn.execute(query, (min_edge, cutoff, limit)).fetchall()
+
+    pair_index = _build_pair_index() if tier == "pro" else {}
     return [
         {
             "id": row[0],
@@ -80,6 +191,11 @@ def get_opportunities(
             "expected_profit": row[9],
             "poly_price": row[10],
             "kalshi_price": row[11],
+            "calibration": (
+                _calibration_for_row(pair_index, row[2], row[3], row[7])
+                if tier == "pro"
+                else None
+            ),
         }
         for row in rows
     ]
@@ -120,11 +236,22 @@ def get_stats():
 
 @app.get("/api/calibration")
 def get_calibration(
+    request: Request,
     category: str = Query("politics"),
     days_to_resolution: int | None = Query(None),
     net_edge: float = Query(0.01),
 ):
-    """Get calibration context for a hypothetical opportunity."""
+    """Get calibration context for a hypothetical opportunity.
+
+    Gated behind the Pro tier per CLAUDE.md Day 10 (calibration context is
+    explicitly listed as a paid-tier feature on the landing page).
+    """
+    if _get_tier(request) != "pro":
+        raise HTTPException(
+            status_code=402,
+            detail="Calibration context is a Pro feature. Upgrade at /#pricing.",
+        )
+
     resolution_date = None
     if days_to_resolution is not None:
         from datetime import timedelta
@@ -155,7 +282,7 @@ def get_backtest(
     return report.as_dict()
 
 
-# --- Paper trading endpoints ---
+# --- Paper trading ---
 
 
 class OpenPaperRequest(BaseModel):
@@ -166,7 +293,7 @@ class OpenPaperRequest(BaseModel):
 
 
 class ClosePaperRequest(BaseModel):
-    """Payload for POST /api/paper/close.
+    """Payload for POST /api/paper/close/{position_id}.
 
     Exactly one of the two modes must be supplied:
 
@@ -179,7 +306,15 @@ class ClosePaperRequest(BaseModel):
     yes_won: bool | None = None
 
 
-def _position_to_dict(position) -> dict:
+def _paper_engine(request: Request) -> PaperTradingEngine:
+    engine = getattr(request.app.state, "paper_engine", None)
+    if engine is None:
+        engine = PaperTradingEngine()
+        request.app.state.paper_engine = engine
+    return engine
+
+
+def _serialize_position(position: PaperPosition) -> dict:
     return {
         "id": position.id,
         "opportunity_id": position.opportunity_id,
@@ -198,47 +333,95 @@ def _position_to_dict(position) -> dict:
     }
 
 
+class PaperClosePayload(BaseModel):
+    poly_price: float = Field(..., ge=0.0, le=1.0)
+    kalshi_price: float = Field(..., ge=0.0, le=1.0)
+
+
+class PaperResolvePayload(BaseModel):
+    yes_won: bool
+
+
 @app.get("/api/paper/summary")
-def get_paper_summary():
-    """Return the paper trading engine's lightweight account summary."""
-    return app.state.paper.summary()
+def paper_summary(request: Request):
+    """Return the aggregate paper trading account summary."""
+    return _paper_engine(request).summary()
 
 
 @app.get("/api/paper/positions")
-def get_paper_positions(status: str | None = Query(None, pattern="^(open|closed)$")):
-    """List paper positions, optionally filtered by status."""
-    account = app.state.paper.get_account()
-    positions = account.positions
-    if status:
-        positions = [p for p in positions if p.status == status]
+def paper_positions(
+    request: Request,
+    status: str = Query("all", pattern="^(open|closed|all)$"),
+):
+    """List paper trading positions, optionally filtered by status."""
+    account = _paper_engine(request).get_account()
+    if status == "open":
+        positions = [p for p in account.positions if p.status == "open"]
+    elif status == "closed":
+        positions = [p for p in account.positions if p.status == "closed"]
+    else:
+        positions = account.positions
     return {
         "balance": account.balance,
         "total_pnl": account.total_pnl,
-        "positions": [_position_to_dict(p) for p in positions],
+        "count": len(positions),
+        "positions": [_serialize_position(p) for p in positions],
     }
 
 
 @app.post("/api/paper/open")
-def open_paper_position(payload: OpenPaperRequest):
+def open_paper_position(payload: OpenPaperRequest, request: Request):
     """Open a paper position against a logged opportunity."""
-    opp = get_opportunity_by_id(app.state.db, payload.opportunity_id)
+    opp = get_opportunity_by_id(request.app.state.db, payload.opportunity_id)
     if opp is None:
         raise HTTPException(
             status_code=404, detail=f"No opportunity with id={payload.opportunity_id}"
         )
     try:
-        position = app.state.paper.open_position(
+        position = _paper_engine(request).open_position(
             opp, size=payload.size, opportunity_id=payload.opportunity_id
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return _position_to_dict(position)
+    return _serialize_position(position)
+
+
+@app.post("/api/paper/positions/{position_id}/close")
+def paper_close_position(
+    position_id: int, payload: PaperClosePayload, request: Request
+):
+    """Mark-to-market close for an open paper position."""
+    engine = _paper_engine(request)
+    try:
+        pnl = engine.close_position(
+            position_id,
+            poly_price=payload.poly_price,
+            kalshi_price=payload.kalshi_price,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"position_id": position_id, "realized_pnl": pnl}
+
+
+@app.post("/api/paper/positions/{position_id}/resolve")
+def paper_resolve_position(
+    position_id: int, payload: PaperResolvePayload, request: Request
+):
+    """Close an open paper position at final resolution."""
+    engine = _paper_engine(request)
+    try:
+        pnl = engine.close_resolved_position(position_id, yes_won=payload.yes_won)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"position_id": position_id, "realized_pnl": pnl}
 
 
 @app.post("/api/paper/close/{position_id}")
-def close_paper_position(position_id: int, payload: ClosePaperRequest):
-    """Close a paper position mark-to-market or at resolution."""
-    engine = app.state.paper
+def close_paper_position(
+    position_id: int, payload: ClosePaperRequest, request: Request
+):
+    """Close a paper position mark-to-market or at resolution (combined endpoint)."""
+    engine = _paper_engine(request)
     try:
         if payload.yes_won is not None:
             realized = engine.close_resolved_position(position_id, payload.yes_won)
