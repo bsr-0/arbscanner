@@ -96,7 +96,15 @@ def test_parallel_scan_beats_sequential_for_many_pairs():
 
 
 def test_scan_scales_sub_linearly():
-    """With 10 workers, 6x more pairs should take less than 3x the time (good scaling)."""
+    """With a worker pool large enough to saturate the workload, 6x more pairs
+    should take roughly the same wall time (good scaling).
+
+    Each pair triggers 2 fetches (poly + kalshi), so ``max_workers=150`` is
+    enough that every fetch in the 60-pair scan (120 fetches) can run in a
+    single round. At that point both scans are bounded by the fetch latency
+    (``0.05s``), not by the worker count, so the ratio should be near 1×
+    plus CI overhead.
+    """
     fetcher = _slow_fetch(0.05)
 
     timings: dict[int, float] = {}
@@ -105,7 +113,7 @@ def test_scan_scales_sub_linearly():
             pairs = _make_pairs(n)
             start = time.monotonic()
             scan_all_pairs(
-                MagicMock(), MagicMock(), pairs, threshold=0.01, max_workers=10
+                MagicMock(), MagicMock(), pairs, threshold=0.01, max_workers=150
             )
             timings[n] = time.monotonic() - start
 
