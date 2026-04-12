@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from arbscanner.backtest import compute_backtest_report
 from arbscanner.calibration import get_calibration_context, get_historical_edge_stats
 from arbscanner.config import (
     DB_PATH,
@@ -20,7 +21,7 @@ from arbscanner.config import (
     TEMPLATES_DIR,
     settings,
 )
-from arbscanner.db import get_connection
+from arbscanner.db import get_connection, get_opportunity_by_id
 from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
 from arbscanner.models import MatchedPair
@@ -149,7 +150,7 @@ def get_opportunities(
         effective_limit = min(limit, FREE_MAX_OPPORTUNITIES)
         latest_allowed = (now - timedelta(seconds=FREE_ALERT_DELAY_SECONDS)).isoformat()
         query = """
-            SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
+            SELECT id, timestamp, poly_market_id, kalshi_market_id, market_title,
                    direction, gross_edge, net_edge, available_size,
                    expected_profit, poly_price, kalshi_price
             FROM opportunities
@@ -164,7 +165,7 @@ def get_opportunities(
         ).fetchall()
     else:
         query = """
-            SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
+            SELECT id, timestamp, poly_market_id, kalshi_market_id, market_title,
                    direction, gross_edge, net_edge, available_size,
                    expected_profit, poly_price, kalshi_price
             FROM opportunities
@@ -178,19 +179,20 @@ def get_opportunities(
     pair_index = _build_pair_index() if tier == "pro" else {}
     return [
         {
-            "timestamp": row[0],
-            "poly_market_id": row[1],
-            "kalshi_market_id": row[2],
-            "market_title": row[3],
-            "direction": row[4],
-            "gross_edge": row[5],
-            "net_edge": row[6],
-            "available_size": row[7],
-            "expected_profit": row[8],
-            "poly_price": row[9],
-            "kalshi_price": row[10],
+            "id": row[0],
+            "timestamp": row[1],
+            "poly_market_id": row[2],
+            "kalshi_market_id": row[3],
+            "market_title": row[4],
+            "direction": row[5],
+            "gross_edge": row[6],
+            "net_edge": row[7],
+            "available_size": row[8],
+            "expected_profit": row[9],
+            "poly_price": row[10],
+            "kalshi_price": row[11],
             "calibration": (
-                _calibration_for_row(pair_index, row[1], row[2], row[6])
+                _calibration_for_row(pair_index, row[2], row[3], row[7])
                 if tier == "pro"
                 else None
             ),
@@ -267,7 +269,41 @@ def get_calibration(
     }
 
 
+# --- Backtest endpoints ---
+
+
+@app.get("/api/backtest")
+def get_backtest(
+    hours: int = Query(168, ge=1, le=24 * 365),
+    min_edge: float = Query(0.0, ge=0.0),
+):
+    """Aggregate hypothetical + realized performance across logged opportunities."""
+    report = compute_backtest_report(app.state.db, hours=hours, min_edge=min_edge)
+    return report.as_dict()
+
+
 # --- Paper trading ---
+
+
+class OpenPaperRequest(BaseModel):
+    """Payload for POST /api/paper/open."""
+
+    opportunity_id: int
+    size: float | None = Field(default=None, ge=0.0)
+
+
+class ClosePaperRequest(BaseModel):
+    """Payload for POST /api/paper/close/{position_id}.
+
+    Exactly one of the two modes must be supplied:
+
+    * ``poly_price`` and ``kalshi_price`` — mark-to-market close.
+    * ``yes_won`` — resolve the position at final outcome.
+    """
+
+    poly_price: float | None = Field(default=None, ge=0.0, le=1.0)
+    kalshi_price: float | None = Field(default=None, ge=0.0, le=1.0)
+    yes_won: bool | None = None
 
 
 def _paper_engine(request: Request) -> PaperTradingEngine:
@@ -333,6 +369,23 @@ def paper_positions(
     }
 
 
+@app.post("/api/paper/open")
+def open_paper_position(payload: OpenPaperRequest, request: Request):
+    """Open a paper position against a logged opportunity."""
+    opp = get_opportunity_by_id(request.app.state.db, payload.opportunity_id)
+    if opp is None:
+        raise HTTPException(
+            status_code=404, detail=f"No opportunity with id={payload.opportunity_id}"
+        )
+    try:
+        position = _paper_engine(request).open_position(
+            opp, size=payload.size, opportunity_id=payload.opportunity_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _serialize_position(position)
+
+
 @app.post("/api/paper/positions/{position_id}/close")
 def paper_close_position(
     position_id: int, payload: PaperClosePayload, request: Request
@@ -361,6 +414,29 @@ def paper_resolve_position(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"position_id": position_id, "realized_pnl": pnl}
+
+
+@app.post("/api/paper/close/{position_id}")
+def close_paper_position(
+    position_id: int, payload: ClosePaperRequest, request: Request
+):
+    """Close a paper position mark-to-market or at resolution (combined endpoint)."""
+    engine = _paper_engine(request)
+    try:
+        if payload.yes_won is not None:
+            realized = engine.close_resolved_position(position_id, payload.yes_won)
+        elif payload.poly_price is not None and payload.kalshi_price is not None:
+            realized = engine.close_position(
+                position_id, payload.poly_price, payload.kalshi_price
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Must provide either yes_won or (poly_price, kalshi_price)",
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"position_id": position_id, "realized_pnl": realized}
 
 
 # --- Stripe webhook ---
@@ -430,3 +506,9 @@ def landing_page(request: Request):
 def dashboard_page(request: Request):
     """Live arb dashboard (HTML version of the terminal UI)."""
     return templates.TemplateResponse(request, "dashboard.html")
+
+
+@app.get("/backtest", response_class=HTMLResponse)
+def backtest_page(request: Request):
+    """Backtest + paper trading performance page."""
+    return templates.TemplateResponse(request, "backtest.html")

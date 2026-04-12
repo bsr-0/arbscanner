@@ -1,6 +1,7 @@
 """SQLite logging for historical arb opportunities."""
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from arbscanner.config import DB_PATH
@@ -39,6 +40,40 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
         conn.execute(index_sql)
     conn.commit()
     return conn
+
+
+def get_opportunity_by_id(
+    conn: sqlite3.Connection, opportunity_id: int
+) -> ArbOpportunity | None:
+    """Fetch a single logged opportunity by id and rehydrate into ArbOpportunity.
+
+    Returns ``None`` if the row does not exist. Used by paper trading flows
+    that need to re-open a specific historical opportunity.
+    """
+    row = conn.execute(
+        """SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
+                  direction, gross_edge, net_edge, available_size,
+                  expected_profit, poly_price, kalshi_price
+           FROM opportunities
+           WHERE id = ?""",
+        (opportunity_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return ArbOpportunity(
+        poly_title=row[3],
+        kalshi_title=row[3],
+        poly_market_id=row[1],
+        kalshi_market_id=row[2],
+        direction=row[4],
+        poly_price=row[9],
+        kalshi_price=row[10],
+        gross_edge=row[5],
+        net_edge=row[6],
+        available_size=row[7],
+        expected_profit=row[8],
+        timestamp=datetime.fromisoformat(row[0]),
+    )
 
 
 def log_opportunities(conn: sqlite3.Connection, opportunities: list[ArbOpportunity]) -> None:

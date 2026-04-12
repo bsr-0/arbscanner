@@ -478,3 +478,58 @@ def test_build_table_includes_calibration_column():
     # Rich.Table stores columns in order; the last column should be Calibration.
     column_headers = [c.header for c in table.columns]
     assert column_headers[-1] == "Calibration"
+
+
+# ---------------------------------------------------------------------------
+# Additional engine coverage (complements the HEAD engine tests above).
+# ---------------------------------------------------------------------------
+
+
+def test_arb_opportunity_pays_regardless_of_outcome(engine):
+    """A real arb (sum < $1) pays the same positive PnL whichever side resolves."""
+    opp = _make_opp(poly_price=0.40, kalshi_price=0.45, available_size=10.0)
+    p1 = engine.open_position(opp)
+    p2 = engine.open_position(opp)
+
+    pnl_yes = engine.close_resolved_position(p1.id, yes_won=True)
+    pnl_no = engine.close_resolved_position(p2.id, yes_won=False)
+
+    assert pnl_yes == pytest.approx(pnl_no)
+    assert pnl_yes > 0
+
+
+def test_get_open_positions_filters(engine):
+    p1 = engine.open_position(_make_opp())
+    p2 = engine.open_position(
+        _make_opp(poly_market_id="poly_2", kalshi_market_id="kalshi_2")
+    )
+    engine.close_position(p1.id, 0.5, 0.5)
+
+    open_positions = engine.get_open_positions()
+    assert len(open_positions) == 1
+    assert open_positions[0].id == p2.id
+
+
+def test_direction_no_maps_correctly(engine):
+    opp = _make_opp(direction="poly_no_kalshi_yes")
+    position = engine.open_position(opp)
+    assert position.poly_side == "no"
+    assert position.kalshi_side == "yes"
+
+
+def test_persistence_across_engine_instances(tmp_path: Path):
+    """A position opened in one engine is visible from a fresh engine on the same DB."""
+    db_path = tmp_path / "persist.db"
+    engine1 = PaperTradingEngine(db_path=db_path, initial_balance=500.0)
+    try:
+        p = engine1.open_position(_make_opp(available_size=10.0))
+    finally:
+        engine1.close()
+
+    engine2 = PaperTradingEngine(db_path=db_path, initial_balance=500.0)
+    try:
+        reloaded = engine2.get_open_positions()
+        assert len(reloaded) == 1
+        assert reloaded[0].id == p.id
+    finally:
+        engine2.close()
