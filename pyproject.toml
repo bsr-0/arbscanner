@@ -2,27 +2,13 @@
 name = "arbscanner"
 version = "0.1.0"
 description = "Cross-platform prediction market arbitrage scanner"
-# Pinned to 3.12.x because torch 2.2.2 — which we pin for macOS x86_64
-# wheel availability — only ships cp312 wheels. If the torch ceiling is
-# ever raised (e.g. when Intel Mac is dropped), this can widen.
+# Pinned to 3.12.x in combination with `.python-version`. 3.13/3.14 are
+# too new for several transitive deps to have wheels yet — widening this
+# can wait until the ML ecosystem catches up.
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "pmxt",
     "sentence-transformers",
-    # torch 2.3+ dropped macOS x86_64 (Intel Mac) wheels. Pin to the last
-    # version that still ships universal macOS wheels so contributors on
-    # Intel Macs can `uv sync` without hitting "no wheel for platform"
-    # errors. Linux and Apple Silicon are unaffected by this ceiling.
-    "torch<=2.2.2",
-    # torch 2.2.2 was built against numpy 1.x and throws
-    # "Failed to initialize NumPy: _ARRAY_API not found" at import time
-    # when resolved against numpy 2.x. Keep numpy on the 1.x line so
-    # sentence-transformers can actually load its backend.
-    "numpy<2",
-    # transformers 4.50+ hard-requires torch>=2.4, which conflicts with
-    # our torch<=2.2.2 Intel-Mac ceiling. Keep transformers on a line
-    # that still supports torch 2.2.x so sentence-transformers imports.
-    "transformers<4.50",
     "anthropic",
     "rich",
     "python-dotenv",
@@ -48,6 +34,13 @@ packages = ["src/arbscanner"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+
+[tool.uv]
+# Only use Python interpreters uv itself installed. Stops a stray conda
+# base env (3.14 on Ben's machine) from hijacking `uv sync` and defeating
+# `.python-version`. Contributors who prefer their own interpreter can
+# override per-invocation with `uv sync --python /path/to/python3.12`.
+python-preference = "only-managed"
 
 [project.optional-dependencies]
 dev = [

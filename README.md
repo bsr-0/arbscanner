@@ -45,8 +45,9 @@ The `pmxt` Python library shells out to a Node.js sidecar (`pmxtjs`) to talk to 
 git clone https://github.com/YOUR-ORG/arbscanner.git
 cd arbscanner
 
-# 2. Install Python 3.12 if you don't have it (torch 2.2.2 is cp312-only;
-#    `.python-version` pins the project to 3.12.x)
+# 2. Install Python 3.12 if you don't have it. `.python-version` pins
+#    the project to 3.12.x, and `tool.uv.python-preference = "only-managed"`
+#    forces uv to use its own interpreter (not conda, not system Python).
 uv python install 3.12
 
 # 3. Install Python deps (creates .venv automatically using 3.12)
@@ -59,6 +60,10 @@ npm install -g pmxtjs
 cp .env.example .env
 $EDITOR .env
 ```
+
+**Conda users**: `tool.uv.python-preference = "only-managed"` means `uv sync` ignores your active conda env. If you want to use your conda Python instead, pass `--python /path/to/python3.12` explicitly. Otherwise just let uv manage it.
+
+**Intel Mac (`x86_64`) users**: PyTorch dropped macOS x86_64 wheels after 2.2.2, and the rest of the ML stack has moved on from it. The supported path for Intel Macs is Docker — `docker compose up --build` works out of the box. Native Intel-Mac installs are possible by pinning `torch<=2.2.2`, `numpy<2`, and `transformers<4.50` in your local `pyproject.toml`, but that path isn't shipped here.
 
 The scanner runs in read-only mode by default — you only need exchange private keys if you plan to add execution later. `ANTHROPIC_API_KEY` is strongly recommended so the matcher can confirm ambiguous pairs.
 
