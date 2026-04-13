@@ -181,18 +181,61 @@ def check_node() -> CheckResult:
 def check_pmxtjs() -> CheckResult:
     """The Node sidecar binary ``pmxtjs`` must be globally installed.
 
-    We only validate discoverability here — if pmxtjs is on PATH we trust
-    the install; probing its RPC protocol is what ``--network`` does.
+    Two discovery paths are worth checking:
+
+    1. Shell ``PATH`` — the common case. If ``shutil.which`` finds it,
+       we're done.
+    2. ``npm config get prefix`` — npm's global install location. On
+       macOS with nvm/asdf/homebrew-managed Node, the npm prefix often
+       isn't on the shell ``PATH`` that the user's terminal sees,
+       *but* pmxt's own Node child process still finds the binary fine
+       because Node looks it up via its own module/bin resolution.
+
+    So if we find pmxtjs via the npm prefix but not on ``PATH``, we
+    emit a ``warn`` (not ``fail``) — scanning will work, but interactive
+    shell invocations of ``pmxtjs`` won't. ``--network`` is the
+    authoritative test regardless.
     """
     bin_path = shutil.which("pmxtjs")
-    if not bin_path:
-        return CheckResult(
-            name="pmxtjs",
-            severity="fail",
-            message="`pmxtjs` Node sidecar not on PATH",
-            fix="Run `npm install -g pmxtjs`",
-        )
-    return CheckResult(name="pmxtjs", severity="ok", message=f"pmxtjs at {bin_path}")
+    if bin_path:
+        return CheckResult(name="pmxtjs", severity="ok", message=f"pmxtjs at {bin_path}")
+
+    # Fallback: probe npm's global prefix. This handles the common case
+    # where nvm/asdf/homebrew installed node in a location the user's
+    # shell rc doesn't export onto PATH.
+    npm = shutil.which("npm")
+    if npm:
+        try:
+            out = subprocess.run(
+                [npm, "config", "get", "prefix"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            prefix = Path(out.stdout.strip())
+            candidate = prefix / "bin" / "pmxtjs"
+            if candidate.exists():
+                return CheckResult(
+                    name="pmxtjs",
+                    severity="warn",
+                    message=f"pmxtjs installed at {candidate} but not on shell PATH",
+                    fix=(
+                        f"Add the npm global bin to PATH: "
+                        f'`export PATH="{prefix}/bin:$PATH"` '
+                        "(then add that to ~/.zshrc or ~/.bashrc)"
+                    ),
+                )
+        except (subprocess.SubprocessError, OSError):
+            # npm is flaky or missing — fall through to the fail below.
+            pass
+
+    return CheckResult(
+        name="pmxtjs",
+        severity="fail",
+        message="`pmxtjs` Node sidecar not found",
+        fix="Run `npm install -g pmxtjs` and ensure the npm global bin is on PATH",
+    )
 
 
 def check_env_file() -> CheckResult:

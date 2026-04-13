@@ -96,9 +96,11 @@ def test_node_ok(monkeypatch):
     assert "20.10.0" in result.message
 
 
-def test_pmxtjs_missing():
-    with patch.object(doctor.shutil, "which", return_value=None):
-        result = doctor.check_pmxtjs()
+def test_pmxtjs_missing(monkeypatch):
+    """No pmxtjs on PATH AND no npm prefix hit → fail."""
+    # shutil.which returns None for both pmxtjs and npm.
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
+    result = doctor.check_pmxtjs()
     assert result.severity == "fail"
     assert "npm install -g pmxtjs" in result.fix
 
@@ -107,6 +109,51 @@ def test_pmxtjs_ok():
     with patch.object(doctor.shutil, "which", return_value="/usr/local/bin/pmxtjs"):
         result = doctor.check_pmxtjs()
     assert result.severity == "ok"
+
+
+def test_pmxtjs_warn_when_installed_but_not_on_path(tmp_path, monkeypatch):
+    """The Ben case: npm installed pmxtjs but shell PATH doesn't expose it.
+
+    pmxt's own Node child process still finds the binary, so scanning
+    works — we should warn (not fail) so doctor stops looking like it's
+    in conflict with `--network` passing.
+    """
+    prefix = tmp_path
+    (prefix / "bin").mkdir()
+    (prefix / "bin" / "pmxtjs").write_text("#!/bin/sh\n")
+
+    def _which(name: str) -> str | None:
+        # pmxtjs not on PATH, but npm itself is.
+        return "/usr/local/bin/npm" if name == "npm" else None
+
+    class _FakeOut:
+        stdout = f"{prefix}\n"
+
+    monkeypatch.setattr(doctor.shutil, "which", _which)
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **kw: _FakeOut())
+
+    result = doctor.check_pmxtjs()
+    assert result.severity == "warn"
+    assert str(prefix) in result.message
+    assert "PATH" in result.fix
+
+
+def test_pmxtjs_fail_when_npm_prefix_has_no_pmxtjs(tmp_path, monkeypatch):
+    """npm prefix exists but pmxtjs isn't actually installed there → fail."""
+    prefix = tmp_path  # empty bin/
+    (prefix / "bin").mkdir()
+
+    def _which(name: str) -> str | None:
+        return "/usr/local/bin/npm" if name == "npm" else None
+
+    class _FakeOut:
+        stdout = f"{prefix}\n"
+
+    monkeypatch.setattr(doctor.shutil, "which", _which)
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **kw: _FakeOut())
+
+    result = doctor.check_pmxtjs()
+    assert result.severity == "fail"
 
 
 def test_env_file_missing(tmp_path, monkeypatch):
