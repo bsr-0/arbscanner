@@ -71,14 +71,32 @@ class CheckResult:
 
 
 def check_python_version() -> CheckResult:
-    """pyproject.toml pins ``requires-python = ">=3.12"``."""
+    """pyproject.toml pins ``requires-python = ">=3.12,<3.13"``.
+
+    The 3.13+ upper bound exists because torch 2.2.2 — which is itself
+    pinned for macOS x86_64 wheel availability — only ships cp312
+    wheels. Running the project under 3.13 or 3.14 will fail during
+    ``uv sync`` with a "no wheel for current platform" error on torch.
+    We surface that as a ``fail`` here so the signal lands in ``doctor``
+    rather than mid-sync.
+    """
     major, minor = sys.version_info[:2]
     if (major, minor) < (3, 12):
         return CheckResult(
             name="python",
             severity="fail",
-            message=f"Python {major}.{minor} detected; need 3.12+",
-            fix="Install Python 3.12 or newer (e.g. `uv python install 3.12`)",
+            message=f"Python {major}.{minor} detected; need 3.12.x",
+            fix="Install Python 3.12: `uv python install 3.12` and `uv sync`",
+        )
+    if (major, minor) >= (3, 13):
+        return CheckResult(
+            name="python",
+            severity="fail",
+            message=(
+                f"Python {major}.{minor} detected; project requires 3.12.x "
+                "(torch 2.2.2 only ships cp312 wheels)"
+            ),
+            fix="Run `uv python install 3.12` and re-run `uv sync`",
         )
     return CheckResult(
         name="python",

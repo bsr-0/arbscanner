@@ -29,7 +29,7 @@ Every candidate opportunity is scored against a historical calibration layer der
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| Python      | 3.12+   | Managed via `uv` |
+| Python      | 3.12.x  | Pinned in `.python-version`; 3.13+ doesn't have torch 2.2.2 wheels. Use `uv python install 3.12` |
 | Node.js     | 18+     | Required by the `pmxtjs` sidecar used by `pmxt` |
 | uv          | latest  | Python package + project manager |
 | Anthropic API key | —  | Only needed for LLM-assisted match confirmation |
@@ -45,13 +45,17 @@ The `pmxt` Python library shells out to a Node.js sidecar (`pmxtjs`) to talk to 
 git clone https://github.com/YOUR-ORG/arbscanner.git
 cd arbscanner
 
-# 2. Install Python deps (creates .venv automatically)
+# 2. Install Python 3.12 if you don't have it (torch 2.2.2 is cp312-only;
+#    `.python-version` pins the project to 3.12.x)
+uv python install 3.12
+
+# 3. Install Python deps (creates .venv automatically using 3.12)
 uv sync
 
-# 3. Install the Node.js sidecar required by pmxt
+# 4. Install the Node.js sidecar required by pmxt
 npm install -g pmxtjs
 
-# 4. Copy the env template and fill in any keys you need
+# 5. Copy the env template and fill in any keys you need
 cp .env.example .env
 $EDITOR .env
 ```

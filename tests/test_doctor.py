@@ -36,6 +36,23 @@ def test_python_version_fail_below_312():
     assert "3.11" in result.message
 
 
+def test_python_version_fail_above_312():
+    """3.13+ is pinned out because torch 2.2.2 has no cp313/cp314 wheels."""
+    with patch.object(doctor.sys, "version_info", (3, 14, 0, "final", 0)):
+        result = doctor.check_python_version()
+    assert result.severity == "fail"
+    assert "3.14" in result.message
+    assert "3.12" in result.message
+    assert "uv python install 3.12" in result.fix
+
+
+def test_python_version_fail_313():
+    with patch.object(doctor.sys, "version_info", (3, 13, 1, "final", 0)):
+        result = doctor.check_python_version()
+    assert result.severity == "fail"
+    assert "3.13" in result.message
+
+
 def test_pmxt_missing():
     with patch.object(doctor.importlib.util, "find_spec", return_value=None):
         result = doctor.check_pmxt()
