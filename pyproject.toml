@@ -6,6 +6,11 @@ requires-python = ">=3.12"
 dependencies = [
     "pmxt",
     "sentence-transformers",
+    # torch 2.3+ dropped macOS x86_64 (Intel Mac) wheels. Pin to the last
+    # version that still ships universal macOS wheels so contributors on
+    # Intel Macs can `uv sync` without hitting "no wheel for platform"
+    # errors. Linux and Apple Silicon are unaffected by this ceiling.
+    "torch<=2.2.2",
     "anthropic",
     "rich",
     "python-dotenv",
