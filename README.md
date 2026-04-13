@@ -72,20 +72,23 @@ uv sync
 npm install -g pmxtjs
 cp .env.example .env   # add ANTHROPIC_API_KEY
 
-# 1. Build the matched-pair map (run once, then occasionally)
+# 1. Verify the environment is good to go (fails fast with a fix-it list)
+uv run arbscanner doctor
+
+# 2. Build the matched-pair map (run once, then occasionally)
 uv run arbscanner match
 
-# 2. Inspect the matches the pipeline produced
+# 3. Inspect the matches the pipeline produced
 uv run arbscanner pairs
 
-# 3. Start the live terminal scanner (refreshes every 30s by default)
+# 4. Start the live terminal scanner (refreshes every 30s by default)
 uv run arbscanner scan --interval 30 --threshold 0.01
 
-# 4. In another terminal, start the FastAPI web dashboard
+# 5. In another terminal, start the FastAPI web dashboard
 uv run arbscanner serve --port 8000
 #    open http://localhost:8000/dashboard
 
-# 5. (Optional) Ingest historical resolutions for calibration context
+# 6. (Optional) Ingest historical resolutions for calibration context
 uv run arbscanner calibrate --ingest-live --limit 500
 ```
 
@@ -99,6 +102,28 @@ The top-level command is `arbscanner` (installed as a script by `uv sync`). All 
 
 ```bash
 uv run arbscanner <command> [flags]
+```
+
+### `arbscanner doctor` — preflight check
+
+Validates every runtime prerequisite a fresh checkout needs *before* you run `scan` or `match`. Prints a table of check results and a fix-it punch list, then exits non-zero if any hard prerequisite is missing.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--network` | off | Also round-trip a single market fetch through pmxt against Polymarket + Kalshi |
+
+Offline checks cover Python version, `pmxt` importability, Node.js and `pmxtjs` on `PATH`, the `.env` file, `ANTHROPIC_API_KEY`, the matched-pair cache, SQLite writability, calibration data, and alert sinks (including the free-tier-silences-alerts foot-gun).
+
+Exit codes:
+- `0` — all checks passed, or only warnings/info remain (e.g. empty cache on a fresh checkout).
+- `1` — at least one hard prerequisite is missing; the scanner will not run until you address the reported items.
+
+```bash
+# Fast offline check (no network, no credentials needed)
+uv run arbscanner doctor
+
+# Also prove Polymarket + Kalshi are reachable via the Node sidecar
+uv run arbscanner doctor --network
 ```
 
 ### `arbscanner scan` — live arb scanner

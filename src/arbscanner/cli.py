@@ -493,6 +493,17 @@ def cmd_execute(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Run the preflight environment checker and exit non-zero on hard failures."""
+    from arbscanner.doctor import exit_code, render, run_all_checks
+
+    results = run_all_checks(include_network=args.network)
+    render(results, console=console)
+    code = exit_code(results)
+    if code != 0:
+        sys.exit(code)
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Replay logged opportunities against historical resolved-market outcomes."""
     from datetime import datetime
@@ -755,6 +766,16 @@ def main() -> None:
         help="Starting paper balance for the replay (default: 10000)",
     )
 
+    # doctor command
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Preflight: validate env, deps, sidecar, and data files"
+    )
+    doctor_parser.add_argument(
+        "--network",
+        action="store_true",
+        help="Also probe Polymarket + Kalshi via pmxt (requires network)",
+    )
+
     # backup command
     backup_parser = subparsers.add_parser(
         "backup", help="Database backup, restore, list, prune"
@@ -790,6 +811,7 @@ def main() -> None:
         "paper": cmd_paper,
         "backtest": cmd_backtest,
         "execute": cmd_execute,
+        "doctor": cmd_doctor,
     }
     commands[args.command](args)
 
