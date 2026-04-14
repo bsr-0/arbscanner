@@ -76,7 +76,7 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -91,15 +91,18 @@ requires-dist = [
     { name = "pandas" },
     { name = "pmxt" },
     { name = "pyarrow" },
-    { name = "pytest", marker = "extra == 'dev'" },
     { name = "python-dotenv" },
     { name = "rich" },
-    { name = "ruff", marker = "extra == 'dev'" },
     { name = "sentence-transformers" },
     { name = "stripe" },
     { name = "uvicorn", extras = ["standard"] },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
 
 [[package]]
 name = "certifi"

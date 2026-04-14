@@ -42,8 +42,15 @@ line-length = 100
 # override per-invocation with `uv sync --python /path/to/python3.12`.
 python-preference = "only-managed"
 
-[project.optional-dependencies]
+# PEP 735 dependency groups. Unlike `[project.optional-dependencies]`
+# (which requires `--extra dev` to install), uv installs default groups
+# automatically on `uv sync`. This means a fresh clone gets a runnable
+# test suite without any extra flags — which eliminates the silent
+# "tests don't work until you rediscover --extra dev" onboarding trap.
+# CI can still drop dev deps with `uv sync --no-dev` or `--no-group dev`.
+[dependency-groups]
 dev = [
     "pytest",
     "ruff",
 ]
+
