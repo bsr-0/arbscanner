@@ -388,6 +388,7 @@ All configuration is driven by environment variables loaded from `.env` (see `.e
 | `STRIPE_SECRET_KEY` | Optional | Stripe secret key for the paid-tier landing page |
 | `STRIPE_WEBHOOK_SECRET` | Optional | Stripe webhook signing secret |
 | `STRIPE_PRICE_ID` | Optional | Stripe price ID for the subscription |
+| `ARBSCANNER_PUBLIC_URL` | If Stripe enabled | Absolute base URL (e.g. `https://arbscanner.example.com`) used to build Stripe Checkout success/cancel redirects. Default `http://localhost:8000` |
 | `ARBSCANNER_SECRET_KEY` | Recommended | Session secret for the FastAPI web app |
 | `ARBSCANNER_TIER` | Optional | `pro` (default) or `free`. Enforces the landing-page free-tier caps: top 3 opportunities, 5-minute delayed view, no Telegram/Discord alerts, no calibration context. Individual requests can override with an `X-Arbscanner-Tier` header. |
 

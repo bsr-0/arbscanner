@@ -494,11 +494,15 @@ def create_checkout_session():
     if not settings.stripe_secret_key or not settings.stripe_price_id:
         raise HTTPException(status_code=503, detail="Stripe not configured")
 
+    # Stripe rejects Session creation if success_url / cancel_url aren't
+    # absolute URLs. Build them off the configured public base so the
+    # redirect comes back to the right host in every environment.
+    base = settings.public_url.rstrip("/")
     session = stripe.checkout.Session.create(
         mode="subscription",
         line_items=[{"price": settings.stripe_price_id, "quantity": 1}],
-        success_url="/?payment=success",
-        cancel_url="/?payment=cancelled",
+        success_url=f"{base}/?payment=success",
+        cancel_url=f"{base}/?payment=cancelled",
     )
     return {"checkout_url": session.url}
 

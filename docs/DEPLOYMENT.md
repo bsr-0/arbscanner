@@ -198,6 +198,7 @@ All variables are optional unless marked **required**. Settings are read from `.
 | `STRIPE_SECRET_KEY` | string | — | Enable paid-tier checkout flow |
 | `STRIPE_WEBHOOK_SECRET` | string | — | Validate Stripe webhooks |
 | `STRIPE_PRICE_ID` | string | — | Product price for `/api/stripe/checkout` |
+| `ARBSCANNER_PUBLIC_URL` | string | `http://localhost:8000` | Absolute base URL for Stripe success/cancel redirects |
 | `ARBSCANNER_SECRET_KEY` | string | `dev-secret-key` | Session/cookie signing key — **change in production** |
 | `ARBSCANNER_LOG_LEVEL` | string | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `ARBSCANNER_LOG_JSON` | bool | `0` | `1` for JSON-formatted logs (stdout) |
@@ -325,12 +326,12 @@ volumes:
 
 **Non-root.** Both the Docker image and the systemd unit run as the unprivileged `arbscanner` user. Don't override this.
 
-**Authentication.** The web dashboard currently has **no authentication**. If you're deploying publicly, either:
+**Authentication.** The web dashboard currently has **no per-user authentication**. Stripe checkout + webhook endpoints are wired and working, but tier enforcement is still driven by the process-wide `ARBSCANNER_TIER` env var — there is no persistence layer mapping paying customers to pro access. Webhooks currently only log `checkout.session.completed` and `customer.subscription.deleted` events. If you're deploying publicly, either:
 1. Put it behind nginx basic auth / oauth2-proxy
-2. Enable Stripe-based tier enforcement (scaffolding exists but is not enforced on the API endpoints in v1)
-3. Keep it on a private network
+2. Keep it on a private network
+3. Accept that every visitor gets the tier set by `ARBSCANNER_TIER`
 
-**Stripe webhook validation.** The `/api/stripe/webhook` endpoint validates signatures using `STRIPE_WEBHOOK_SECRET`. Do not skip this.
+**Stripe configuration.** `/api/stripe/checkout` creates real Checkout Sessions; `/api/stripe/webhook` validates the `stripe-signature` header against `STRIPE_WEBHOOK_SECRET`. Set `ARBSCANNER_PUBLIC_URL` to the externally-reachable base URL of this deployment so post-checkout redirects land back on the right host.
 
 ---
 

@@ -769,3 +769,182 @@ def test_metrics_endpoint_reflects_new_observations():
     assert _counter_value(after) >= _counter_value(before) + 1
 
     app.state.db.close()
+
+
+# ---------------------------------------------------------------------------
+# Stripe endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_stripe_checkout_503_when_not_configured(monkeypatch):
+    """Without secret_key + price_id we must 503, not crash."""
+    from arbscanner.config import settings
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "")
+    monkeypatch.setattr(settings, "stripe_price_id", "")
+
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/api/stripe/checkout")
+    assert resp.status_code == 503
+    assert "not configured" in resp.json()["detail"].lower()
+
+    app.state.db.close()
+
+
+def test_stripe_checkout_uses_absolute_public_url(monkeypatch):
+    """Regression: success_url and cancel_url must be absolute URLs.
+
+    The prior code passed ``/?payment=success`` as a bare relative path,
+    which Stripe rejects at Session creation time. This test fails if
+    anyone reverts the config-driven absolute URL back to a relative one.
+    """
+    from arbscanner.config import settings
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_xxx")
+    monkeypatch.setattr(settings, "stripe_price_id", "price_xxx")
+    monkeypatch.setattr(settings, "public_url", "https://arbscanner.example.com")
+
+    captured: dict = {}
+
+    class _FakeSession:
+        url = "https://checkout.stripe.com/fake_session_url"
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeSession()
+
+    import stripe
+
+    monkeypatch.setattr(stripe.checkout.Session, "create", _fake_create)
+
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/api/stripe/checkout")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"checkout_url": "https://checkout.stripe.com/fake_session_url"}
+
+    # Stripe-side: both redirects must be absolute and prefixed with the
+    # configured public URL.
+    assert captured["success_url"] == "https://arbscanner.example.com/?payment=success"
+    assert captured["cancel_url"] == "https://arbscanner.example.com/?payment=cancelled"
+    assert captured["mode"] == "subscription"
+    assert captured["line_items"] == [{"price": "price_xxx", "quantity": 1}]
+
+    app.state.db.close()
+
+
+def test_stripe_checkout_strips_trailing_slash_from_public_url(monkeypatch):
+    """``ARBSCANNER_PUBLIC_URL=https://x.com/`` must not produce `//?payment=...`."""
+    from arbscanner.config import settings
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_xxx")
+    monkeypatch.setattr(settings, "stripe_price_id", "price_xxx")
+    monkeypatch.setattr(settings, "public_url", "https://arbscanner.example.com/")
+
+    captured: dict = {}
+
+    class _FakeSession:
+        url = "x"
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeSession()
+
+    import stripe
+
+    monkeypatch.setattr(stripe.checkout.Session, "create", _fake_create)
+
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+    client.get("/api/stripe/checkout")
+
+    assert captured["success_url"] == "https://arbscanner.example.com/?payment=success"
+    assert captured["cancel_url"] == "https://arbscanner.example.com/?payment=cancelled"
+
+    app.state.db.close()
+
+
+def test_stripe_webhook_503_when_not_configured(monkeypatch):
+    from arbscanner.config import settings
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "")
+
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post("/api/stripe/webhook", content=b"{}")
+    assert resp.status_code == 503
+
+    app.state.db.close()
+
+
+def test_stripe_webhook_rejects_bad_signature(monkeypatch):
+    """Invalid ``stripe-signature`` must 400 and not process the event."""
+    from arbscanner.config import settings
+    import stripe
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_xxx")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "whsec_xxx")
+
+    def _boom(payload, sig, secret):
+        raise stripe.error.SignatureVerificationError("bad sig", sig)
+
+    monkeypatch.setattr(stripe.Webhook, "construct_event", _boom)
+
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post(
+        "/api/stripe/webhook",
+        content=b'{"type":"x"}',
+        headers={"stripe-signature": "t=0,v1=deadbeef"},
+    )
+    assert resp.status_code == 400
+    assert "signature" in resp.json()["detail"].lower()
+
+    app.state.db.close()
+
+
+def test_stripe_webhook_accepts_valid_event(monkeypatch):
+    """Valid signature → 200 and the event type dispatch runs."""
+    from arbscanner.config import settings
+    import stripe
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_xxx")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "whsec_xxx")
+
+    fake_event = {
+        "type": "checkout.session.completed",
+        "data": {"object": {"customer_email": "ben@example.com"}},
+    }
+    monkeypatch.setattr(stripe.Webhook, "construct_event", lambda *a, **kw: fake_event)
+
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post(
+        "/api/stripe/webhook",
+        content=b'{"type":"checkout.session.completed"}',
+        headers={"stripe-signature": "t=0,v1=valid"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+    app.state.db.close()
