@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import stripe
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,7 @@ from arbscanner.config import (
 from arbscanner.db import get_connection, get_opportunity_by_id
 from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
+from arbscanner.metrics import MetricsRegistry
 from arbscanner.models import MatchedPair
 from arbscanner.paper_trading import PaperPosition, PaperTradingEngine
 
@@ -232,6 +233,25 @@ def get_stats():
         "uptime_seconds": int(time.time() - app.state.start_time),
         **stats,
     }
+
+
+# Prometheus text exposition format, version 0.0.4. Scrapers look for this
+# exact content-type; returning application/json here would make them reject
+# the payload. See: prometheus.io/docs/instrumenting/exposition_formats/
+_PROM_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def get_metrics() -> PlainTextResponse:
+    """Prometheus-compatible metrics endpoint.
+
+    Every pre-registered metric in :mod:`arbscanner.metrics` is rendered
+    here — scan cycles, order-book fetches, rate-limit waits, alerts,
+    and the scan-cycle duration histogram. The engine increments these
+    via its own code path; this endpoint only reads.
+    """
+    body = MetricsRegistry.instance().export_text()
+    return PlainTextResponse(content=body, media_type=_PROM_CONTENT_TYPE)
 
 
 @app.get("/api/calibration")

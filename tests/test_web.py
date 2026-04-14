@@ -699,3 +699,73 @@ def test_backtest_page_renders():
     assert "Backtest" in resp.text
 
     app.state.db.close()
+
+
+def test_metrics_endpoint_exposes_prometheus_format():
+    """``/metrics`` must return Prometheus text-format 0.0.4 with every
+    pre-registered metric from arbscanner.metrics present.
+
+    Scrapers key off the ``text/plain; version=0.0.4`` content type; any
+    other content type (e.g. application/json) makes prometheus_client
+    reject the payload. We also check that the registered scan/alert
+    counters appear in the body so a refactor that silently unregisters
+    them won't go unnoticed.
+    """
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/metrics")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert "version=0.0.4" in resp.headers["content-type"]
+
+    body = resp.text
+    # Every pre-registered metric from metrics.py:480-520 must show up.
+    for name in [
+        "arbscanner_scan_cycles_total",
+        "arbscanner_scan_cycle_seconds",
+        "arbscanner_opportunities_found_total",
+        "arbscanner_order_book_fetches_total",
+        "arbscanner_order_book_fetch_failures_total",
+        "arbscanner_rate_limit_waits_seconds",
+        "arbscanner_alerts_sent_total",
+    ]:
+        assert f"# TYPE {name}" in body, f"missing {name} in /metrics output"
+
+    # Must end with a newline per the Prom text format spec.
+    assert body.endswith("\n")
+
+    app.state.db.close()
+
+
+def test_metrics_endpoint_reflects_new_observations():
+    """Incrementing a counter must be observable on the next scrape."""
+    from arbscanner.metrics import scan_cycles_total
+
+    app = _get_test_app()
+    app.state.db = sqlite3.connect(":memory:")
+    app.state.start_time = 0
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    before = client.get("/metrics").text
+    scan_cycles_total.inc()
+    after = client.get("/metrics").text
+
+    # The counter should have moved forward by at least 1 between the
+    # two scrapes — exact equality is awkward because other tests in the
+    # module may have incremented it, so we just check monotonicity.
+    def _counter_value(body: str) -> int:
+        for line in body.splitlines():
+            if line.startswith("arbscanner_scan_cycles_total ") or line.startswith(
+                "arbscanner_scan_cycles_total{"
+            ):
+                return int(float(line.rsplit(" ", 1)[-1]))
+        raise AssertionError("scan_cycles_total missing from /metrics body")
+
+    assert _counter_value(after) >= _counter_value(before) + 1
+
+    app.state.db.close()

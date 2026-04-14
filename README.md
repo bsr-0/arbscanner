@@ -198,6 +198,12 @@ uv run arbscanner serve --host 0.0.0.0 --port 8000
 uv run arbscanner serve --reload
 ```
 
+Every instance also exposes `/metrics` in Prometheus text exposition format (version 0.0.4). Scan cycles, order-book fetches, rate-limit waits, alerts delivered, and the scan-cycle duration histogram are all populated by `arbscanner.engine`; scraping `http://<host>:8000/metrics` at your preferred interval gets a fleet view without extra configuration:
+
+```bash
+curl -s http://localhost:8000/metrics | head -20
+```
+
 ### `arbscanner paper` — paper trading account
 
 Manage a simulated execution account populated either by `scan --paper` or by
