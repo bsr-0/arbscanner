@@ -1,282 +1,343 @@
-"""Tests for the arbscanner doctor pre-flight command."""
+"""Tests for ``arbscanner doctor`` preflight checks.
 
+These tests patch subprocess / filesystem / import surfaces rather than
+actually shelling out, so they run offline and deterministically.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-
-def _run_doctor(extra_args: list[str] | None = None, monkeypatch=None):
-    """Import and invoke cmd_doctor with an argparse-like namespace."""
-    import argparse
-
-    from arbscanner.cli import cmd_doctor
-
-    ns = argparse.Namespace(skip_connectivity=True)
-    if extra_args:
-        for k, v in (a.split("=") for a in extra_args):
-            setattr(ns, k.lstrip("-").replace("-", "_"), v)
-
-    cmd_doctor(ns)
+from arbscanner import doctor
 
 
 # ---------------------------------------------------------------------------
-# Happy-path: all optional env vars unset, connectivity skipped
+# Individual checks
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_runs_without_crashing(monkeypatch):
-    """Smoke test: doctor must not raise even when nothing is configured."""
-    # Wipe optional env vars so we get deterministic WARN output.
-    for var in (
-        "ANTHROPIC_API_KEY",
-        "TELEGRAM_BOT_TOKEN",
-        "TELEGRAM_CHAT_ID",
-        "DISCORD_WEBHOOK_URL",
-        "POLY_API_KEY",
-        "POLY_API_SECRET",
-        "POLY_PASSPHRASE",
-        "POLY_PRIVATE_KEY",
-        "KALSHI_API_KEY",
-        "KALSHI_PRIVATE_KEY",
-    ):
-        monkeypatch.delenv(var, raising=False)
-
-    # No FAILs expected (node/pmxtjs are FAIL but we check exit code separately).
-    # The important invariant is: no Python exception is raised.
-    import argparse
-
-    from arbscanner.cli import cmd_doctor
-
-    ns = argparse.Namespace(skip_connectivity=True)
-    try:
-        cmd_doctor(ns)
-    except SystemExit:
-        pass  # exit(1) due to FAIL items is expected; the function itself must not crash
+def test_python_version_ok():
+    result = doctor.check_python_version()
+    # Tests run on the supported interpreter, so this must always pass.
+    assert result.severity == "ok"
+    assert "Python" in result.message
 
 
-# ---------------------------------------------------------------------------
-# matched_pairs.json detection
-# ---------------------------------------------------------------------------
+def test_python_version_fail_below_312():
+    with patch.object(doctor.sys, "version_info", (3, 11, 5, "final", 0)):
+        result = doctor.check_python_version()
+    assert result.severity == "fail"
+    assert "3.11" in result.message
 
 
-def test_doctor_detects_missing_matched_pairs(monkeypatch, tmp_path):
-    """WARN emitted when matched_pairs.json doesn't exist."""
-    import argparse
-
-    from arbscanner import config as cfg
-
-    monkeypatch.setattr(cfg, "MATCHED_PAIRS_PATH", tmp_path / "nope.json")
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-
-    from arbscanner.cli import cmd_doctor
-
-    ns = argparse.Namespace(skip_connectivity=True)
-    output_lines: list[str] = []
-
-    with patch("arbscanner.cli.console") as mock_console:
-        mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-        try:
-            cmd_doctor(ns)
-        except SystemExit:
-            pass
-
-    combined = " ".join(output_lines)
-    assert "matched_pairs" in combined.lower()
+def test_python_version_fail_above_312():
+    """3.13+ is pinned out because torch 2.2.2 has no cp313/cp314 wheels."""
+    with patch.object(doctor.sys, "version_info", (3, 14, 0, "final", 0)):
+        result = doctor.check_python_version()
+    assert result.severity == "fail"
+    assert "3.14" in result.message
+    assert "3.12" in result.message
+    assert "uv python install 3.12" in result.fix
 
 
-def test_doctor_detects_populated_matched_pairs(monkeypatch, tmp_path):
-    """PASS emitted and pair count shown when matched_pairs.json is present."""
-    import argparse
-    import json
+def test_python_version_fail_313():
+    with patch.object(doctor.sys, "version_info", (3, 13, 1, "final", 0)):
+        result = doctor.check_python_version()
+    assert result.severity == "fail"
+    assert "3.13" in result.message
 
-    from arbscanner import config as cfg
 
-    pairs_path = tmp_path / "matched_pairs.json"
-    pairs_path.write_text(
-        json.dumps({"pairs": [{"poly_market_id": "a", "kalshi_market_id": "b"}]})
+def test_pmxt_missing():
+    with patch.object(doctor.importlib.util, "find_spec", return_value=None):
+        result = doctor.check_pmxt()
+    assert result.severity == "fail"
+    assert "pmxt" in result.message.lower()
+    assert "uv sync" in result.fix or "pip install" in result.fix
+
+
+def test_node_missing():
+    with patch.object(doctor.shutil, "which", return_value=None):
+        result = doctor.check_node()
+    assert result.severity == "fail"
+    assert "PATH" in result.fix or "nodejs" in result.fix.lower()
+
+
+def test_node_too_old(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: "/usr/bin/node")
+
+    class _FakeOut:
+        stdout = "v16.20.0\n"
+
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda *a, **kw: _FakeOut(),
     )
-    monkeypatch.setattr(cfg, "MATCHED_PAIRS_PATH", pairs_path)
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    result = doctor.check_node()
+    assert result.severity == "fail"
+    assert "16" in result.message
 
-    from arbscanner.cli import cmd_doctor
 
-    ns = argparse.Namespace(skip_connectivity=True)
-    output_lines: list[str] = []
+def test_node_ok(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: "/usr/bin/node")
 
-    with patch("arbscanner.cli.console") as mock_console:
-        mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-        try:
-            cmd_doctor(ns)
-        except SystemExit:
-            pass
+    class _FakeOut:
+        stdout = "v20.10.0\n"
 
-    combined = " ".join(output_lines)
-    assert "1 confirmed pair" in combined
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **kw: _FakeOut())
+    result = doctor.check_node()
+    assert result.severity == "ok"
+    assert "20.10.0" in result.message
+
+
+def test_pmxtjs_missing(monkeypatch):
+    """No pmxtjs on PATH AND no npm prefix hit → fail."""
+    # shutil.which returns None for both pmxtjs and npm.
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
+    result = doctor.check_pmxtjs()
+    assert result.severity == "fail"
+    assert "npm install -g pmxtjs" in result.fix
+
+
+def test_pmxtjs_ok():
+    with patch.object(doctor.shutil, "which", return_value="/usr/local/bin/pmxtjs"):
+        result = doctor.check_pmxtjs()
+    assert result.severity == "ok"
+
+
+def test_pmxtjs_warn_when_installed_but_not_on_path(tmp_path, monkeypatch):
+    """The Ben case: npm installed pmxtjs but shell PATH doesn't expose it.
+
+    pmxt's own Node child process still finds the binary, so scanning
+    works — we should warn (not fail) so doctor stops looking like it's
+    in conflict with `--network` passing.
+    """
+    prefix = tmp_path
+    (prefix / "bin").mkdir()
+    (prefix / "bin" / "pmxtjs").write_text("#!/bin/sh\n")
+
+    def _which(name: str) -> str | None:
+        # pmxtjs not on PATH, but npm itself is.
+        return "/usr/local/bin/npm" if name == "npm" else None
+
+    class _FakeOut:
+        stdout = f"{prefix}\n"
+
+    monkeypatch.setattr(doctor.shutil, "which", _which)
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **kw: _FakeOut())
+
+    result = doctor.check_pmxtjs()
+    assert result.severity == "warn"
+    assert str(prefix) in result.message
+    assert "PATH" in result.fix
+
+
+def test_pmxtjs_fail_when_npm_prefix_has_no_pmxtjs(tmp_path, monkeypatch):
+    """npm prefix exists but pmxtjs isn't actually installed there → fail."""
+    prefix = tmp_path  # empty bin/
+    (prefix / "bin").mkdir()
+
+    def _which(name: str) -> str | None:
+        return "/usr/local/bin/npm" if name == "npm" else None
+
+    class _FakeOut:
+        stdout = f"{prefix}\n"
+
+    monkeypatch.setattr(doctor.shutil, "which", _which)
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **kw: _FakeOut())
+
+    result = doctor.check_pmxtjs()
+    assert result.severity == "fail"
+
+
+def test_env_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "PROJECT_ROOT", tmp_path)
+    result = doctor.check_env_file()
+    assert result.severity == "warn"
+    assert ".env.example" in result.fix
+
+
+def test_env_file_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "PROJECT_ROOT", tmp_path)
+    (tmp_path / ".env").write_text("FOO=bar\n")
+    result = doctor.check_env_file()
+    assert result.severity == "ok"
+
+
+def test_anthropic_key_missing(monkeypatch):
+    monkeypatch.setattr(doctor.settings, "anthropic_api_key", "")
+    result = doctor.check_anthropic_key()
+    assert result.severity == "warn"
+    # Should mention the high-confidence threshold fallback so the user knows
+    # what they're giving up without a key.
+    assert f"{doctor.settings.llm_confirm_high:.2f}" in result.message
+
+
+def test_anthropic_key_present(monkeypatch):
+    monkeypatch.setattr(doctor.settings, "anthropic_api_key", "sk-ant-redacted")
+    result = doctor.check_anthropic_key()
+    assert result.severity == "ok"
+
+
+def test_matched_pairs_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "MATCHED_PAIRS_PATH", tmp_path / "nope.json")
+    result = doctor.check_matched_pairs()
+    assert result.severity == "warn"
+    assert "match" in result.fix.lower()
+
+
+def test_matched_pairs_empty(tmp_path, monkeypatch):
+    path = tmp_path / "matched_pairs.json"
+    path.write_text(json.dumps({"pairs": []}))
+    monkeypatch.setattr(doctor, "MATCHED_PAIRS_PATH", path)
+    result = doctor.check_matched_pairs()
+    assert result.severity == "warn"
+    assert "0 pairs" in result.message
+
+
+def test_matched_pairs_populated(tmp_path, monkeypatch):
+    path = tmp_path / "matched_pairs.json"
+    path.write_text(json.dumps({"pairs": [{"poly_market_id": "p1"}, {"poly_market_id": "p2"}]}))
+    monkeypatch.setattr(doctor, "MATCHED_PAIRS_PATH", path)
+    result = doctor.check_matched_pairs()
+    assert result.severity == "ok"
+    assert "2" in result.message
+
+
+def test_matched_pairs_corrupt(tmp_path, monkeypatch):
+    path = tmp_path / "matched_pairs.json"
+    path.write_text("{this isn't json")
+    monkeypatch.setattr(doctor, "MATCHED_PAIRS_PATH", path)
+    result = doctor.check_matched_pairs()
+    assert result.severity == "fail"
+    assert "unreadable" in result.message.lower() or "Delete" in result.fix
+
+
+def test_database_writable(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "DB_PATH", tmp_path / "arb.db")
+    result = doctor.check_database()
+    assert result.severity == "ok"
+    assert (tmp_path / "arb.db").exists()
+
+
+def test_calibration_info_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "CALIBRATION_DATA_DIR", tmp_path / "nope")
+    result = doctor.check_calibration_data()
+    # Calibration is explicitly optional — missing data should be "info"
+    # not "fail", so self-hosted deployments aren't blocked by it.
+    assert result.severity == "info"
+
+
+def test_calibration_ok_with_data(tmp_path, monkeypatch):
+    data_dir = tmp_path / "cal"
+    data_dir.mkdir()
+    (data_dir / "profiles.json").write_text("{}")
+    monkeypatch.setattr(doctor, "CALIBRATION_DATA_DIR", data_dir)
+    result = doctor.check_calibration_data()
+    assert result.severity == "ok"
+
+
+def test_alerts_none_configured(monkeypatch):
+    monkeypatch.setattr(doctor.settings, "telegram_bot_token", "")
+    monkeypatch.setattr(doctor.settings, "telegram_chat_id", "")
+    monkeypatch.setattr(doctor.settings, "discord_webhook_url", "")
+    result = doctor.check_alert_sinks()
+    assert result.severity == "info"
+
+
+def test_alerts_configured(monkeypatch):
+    monkeypatch.setattr(doctor.settings, "telegram_bot_token", "tok")
+    monkeypatch.setattr(doctor.settings, "telegram_chat_id", "chat")
+    monkeypatch.setattr(doctor.settings, "discord_webhook_url", "")
+    monkeypatch.setattr(doctor.settings, "tier", "pro")
+    result = doctor.check_alert_sinks()
+    assert result.severity == "ok"
+    assert "telegram" in result.message
+
+
+def test_alerts_warn_when_free_tier_silences(monkeypatch):
+    """The free tier drops alerts silently — flag that foot-gun."""
+    monkeypatch.setattr(doctor.settings, "telegram_bot_token", "tok")
+    monkeypatch.setattr(doctor.settings, "telegram_chat_id", "chat")
+    monkeypatch.setattr(doctor.settings, "discord_webhook_url", "")
+    monkeypatch.setattr(doctor.settings, "tier", "free")
+    result = doctor.check_alert_sinks()
+    assert result.severity == "warn"
+    assert "free" in result.message.lower()
 
 
 # ---------------------------------------------------------------------------
-# Database detection
+# Runner + exit code
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_detects_missing_db(monkeypatch, tmp_path):
-    import argparse
-
-    from arbscanner import config as cfg
-
-    monkeypatch.setattr(cfg, "DB_PATH", tmp_path / "missing.db")
-    monkeypatch.setattr(cfg, "MATCHED_PAIRS_PATH", tmp_path / "nope.json")
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-
-    from arbscanner.cli import cmd_doctor
-
-    ns = argparse.Namespace(skip_connectivity=True)
-    output_lines: list[str] = []
-
-    with patch("arbscanner.cli.console") as mock_console:
-        mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-        try:
-            cmd_doctor(ns)
-        except SystemExit:
-            pass
-
-    combined = " ".join(output_lines)
-    assert "arbscanner.db" in combined
+def test_exit_code_ok_only():
+    results = [doctor.CheckResult(name="x", severity="ok", message="ok")]
+    assert doctor.exit_code(results) == 0
 
 
-def test_doctor_detects_existing_db(monkeypatch, tmp_path):
-    import argparse
-    import sqlite3
-
-    from arbscanner import config as cfg
-
-    db = tmp_path / "arb.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute("CREATE TABLE opportunities (id INTEGER PRIMARY KEY)")
-    conn.commit()
-    conn.close()
-
-    monkeypatch.setattr(cfg, "DB_PATH", db)
-    monkeypatch.setattr(cfg, "MATCHED_PAIRS_PATH", tmp_path / "nope.json")
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-
-    from arbscanner.cli import cmd_doctor
-
-    ns = argparse.Namespace(skip_connectivity=True)
-    output_lines: list[str] = []
-
-    with patch("arbscanner.cli.console") as mock_console:
-        mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-        try:
-            cmd_doctor(ns)
-        except SystemExit:
-            pass
-
-    combined = " ".join(output_lines)
-    assert "opportunities" in combined
+def test_exit_code_warn_is_still_zero():
+    results = [doctor.CheckResult(name="x", severity="warn", message="meh")]
+    assert doctor.exit_code(results) == 0
 
 
-# ---------------------------------------------------------------------------
-# Credential checks
-# ---------------------------------------------------------------------------
+def test_exit_code_fail():
+    results = [
+        doctor.CheckResult(name="x", severity="ok", message="ok"),
+        doctor.CheckResult(name="y", severity="fail", message="nope"),
+    ]
+    assert doctor.exit_code(results) == 1
 
 
-def test_doctor_warns_missing_anthropic_key(monkeypatch):
-    import argparse
+def test_run_all_checks_offline_does_not_include_network(monkeypatch):
+    """Without --network, check_network_pmxt must not be called."""
+    called = {"network": False}
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    def _boom():
+        called["network"] = True
+        raise AssertionError("network check ran in offline mode")
 
-    from arbscanner.cli import cmd_doctor
-
-    ns = argparse.Namespace(skip_connectivity=True)
-    output_lines: list[str] = []
-
-    with patch("arbscanner.cli.console") as mock_console:
-        mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-        try:
-            cmd_doctor(ns)
-        except SystemExit:
-            pass
-
-    combined = " ".join(output_lines)
-    assert "ANTHROPIC_API_KEY" in combined
+    monkeypatch.setattr(doctor, "check_network_pmxt", _boom)
+    results = doctor.run_all_checks(include_network=False)
+    assert called["network"] is False
+    assert len(results) == len(doctor.OFFLINE_CHECKS)
 
 
-def test_doctor_passes_anthropic_key_when_set(monkeypatch):
-    import argparse
+def test_run_all_checks_isolates_raising_checks(monkeypatch):
+    """A single check that raises must not abort the whole run."""
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key-1234")
+    def _boom():
+        raise RuntimeError("unexpected")
 
-    from arbscanner.cli import cmd_doctor
+    # Swap in a raising check at the front so we can observe it gets absorbed.
+    monkeypatch.setattr(doctor, "OFFLINE_CHECKS", [_boom, doctor.check_python_version])
 
-    ns = argparse.Namespace(skip_connectivity=True)
-    output_lines: list[str] = []
-
-    with patch("arbscanner.cli.console") as mock_console:
-        mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-        try:
-            cmd_doctor(ns)
-        except SystemExit:
-            pass
-
-    combined = " ".join(output_lines)
-    # 16 chars
-    assert "16 chars" in combined
+    results = doctor.run_all_checks(include_network=False)
+    assert len(results) == 2
+    assert results[0].severity == "fail"
+    assert "unexpected" in results[0].message
+    # Subsequent checks still ran.
+    assert results[1].name == "python"
 
 
-# ---------------------------------------------------------------------------
-# node / pmxtjs detection
-# ---------------------------------------------------------------------------
+def test_render_does_not_crash_on_minimal_results(capsys):
+    """Just a smoke test — render() must not blow up on any severity."""
+    from rich.console import Console
 
-
-def test_doctor_fails_when_node_missing(monkeypatch):
-    import argparse
-
-    with patch("shutil.which", return_value=None):
-        from arbscanner.cli import cmd_doctor
-
-        ns = argparse.Namespace(skip_connectivity=True)
-        output_lines: list[str] = []
-
-        with patch("arbscanner.cli.console") as mock_console:
-            mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-            try:
-                cmd_doctor(ns)
-            except SystemExit as exc:
-                assert exc.code == 1
-
-    combined = " ".join(output_lines)
-    assert "node" in combined.lower()
-
-
-def test_doctor_detects_pmxtjs_when_present(monkeypatch):
-    import argparse
-
-    def fake_which(name):
-        return f"/usr/local/bin/{name}" if name in ("node", "pmxtjs") else None
-
-    import subprocess
-
-    with (
-        patch("shutil.which", side_effect=fake_which),
-        patch(
-            "subprocess.check_output",
-            return_value=b"v20.0.0",
-        ),
-    ):
-        from arbscanner.cli import cmd_doctor
-
-        ns = argparse.Namespace(skip_connectivity=True)
-        output_lines: list[str] = []
-
-        with patch("arbscanner.cli.console") as mock_console:
-            mock_console.print.side_effect = lambda *a, **kw: output_lines.append(str(a))
-            try:
-                cmd_doctor(ns)
-            except SystemExit:
-                pass
-
-    combined = " ".join(output_lines)
-    assert "pmxtjs" in combined.lower()
+    results = [
+        doctor.CheckResult(name="a", severity="ok", message="ok"),
+        doctor.CheckResult(name="b", severity="info", message="info"),
+        doctor.CheckResult(name="c", severity="warn", message="warn", fix="do X"),
+        doctor.CheckResult(name="d", severity="fail", message="bad", fix="fix Y"),
+    ]
+    doctor.render(results, console=Console(force_terminal=False, no_color=True))
+    captured = capsys.readouterr().out
+    assert "a" in captured and "d" in captured
+    assert "do X" in captured
+    assert "fix Y" in captured

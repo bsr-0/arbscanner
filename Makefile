@@ -10,7 +10,7 @@ help: ## Show this help message
 	@echo "arbscanner - available targets:"
 	@echo ""
 	@echo "  help          Show this help message"
-	@echo "  install       Install Python deps and editable package with dev extras"
+	@echo "  install       Install Python deps and editable package (dev group included)"
 	@echo "  install-node  Install the pmxtjs Node sidecar globally"
 	@echo "  test          Run the full test suite (verbose)"
 	@echo "  test-fast     Run tests, failing fast and prioritizing last failures"
@@ -26,9 +26,8 @@ help: ## Show this help message
 	@echo "  docker-run    Start services via docker compose (detached)"
 	@echo "  docker-logs   Tail logs from the scanner service"
 
-install: ## Install Python deps and editable package with dev extras
+install: ## Install Python deps and editable package (dev group included)
 	uv sync
-	uv pip install -e ".[dev]"
 
 install-node: ## Install the pmxtjs Node sidecar globally
 	npm install -g pmxtjs

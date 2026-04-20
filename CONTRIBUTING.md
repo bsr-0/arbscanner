@@ -28,11 +28,9 @@ globally.
 git clone https://github.com/<your-fork>/arbscanner.git
 cd arbscanner
 
-# 2. Install Python deps into a managed venv
+# 2. Install Python deps into a managed venv (includes the dev group
+#    automatically: pytest + ruff, via PEP 735 `[dependency-groups]`).
 uv sync
-
-# 3. Install the project in editable mode with dev extras
-uv pip install -e ".[dev]"
 
 # 4. Install pmxt (Node-based exchange connector CLI)
 npm install -g pmxtjs

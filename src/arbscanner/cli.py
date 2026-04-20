@@ -523,6 +523,17 @@ def cmd_execute(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Run the preflight environment checker and exit non-zero on hard failures."""
+    from arbscanner.doctor import exit_code, render, run_all_checks
+
+    results = run_all_checks(include_network=args.network)
+    render(results, console=console)
+    code = exit_code(results)
+    if code != 0:
+        sys.exit(code)
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Replay logged opportunities against historical resolved-market outcomes."""
     from datetime import datetime
@@ -555,212 +566,6 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             "\n[yellow]No opportunities could be resolved against ingested markets. "
             "Run 'arbscanner calibrate --ingest-live' to populate resolutions.[/yellow]"
         )
-
-
-def cmd_doctor(args: argparse.Namespace) -> None:  # noqa: ARG001
-    """Pre-flight environment check — run before your first scan or live execution.
-
-    Checks each requirement in sequence and prints PASS / WARN / FAIL per item.
-    Exits with code 1 if any FAIL is found, 0 otherwise.
-    """
-    import shutil
-    import sqlite3
-    import subprocess
-    from pathlib import Path
-
-    from arbscanner.config import DATA_DIR, DB_PATH, MATCHED_PAIRS_PATH
-    from arbscanner.exchanges import KALSHI_CRED_VARS, POLY_CRED_VARS
-
-    PASS = "[bold green]PASS[/bold green]"
-    WARN = "[bold yellow]WARN[/bold yellow]"
-    FAIL = "[bold red]FAIL[/bold red]"
-
-    failures: list[str] = []
-
-    def check(label: str, status: str, detail: str = "") -> None:
-        suffix = f"  [dim]{detail}[/dim]" if detail else ""
-        console.print(f"  {status}  {label}{suffix}")
-        if status == FAIL:
-            failures.append(label)
-
-    console.print("\n[bold]arbscanner doctor[/bold] — environment pre-flight\n")
-
-    # ---- Node / pmxtjs ----
-    console.print("[bold]Node.js sidecar[/bold]")
-    node_path = shutil.which("node")
-    if node_path:
-        try:
-            ver = subprocess.check_output(
-                ["node", "--version"], timeout=5, stderr=subprocess.DEVNULL
-            ).decode().strip()
-            check("node runtime", PASS, ver)
-        except Exception as exc:
-            check("node runtime", FAIL, str(exc))
-    else:
-        check("node runtime", FAIL, "not found — install Node.js (https://nodejs.org)")
-
-    pmxt_path = shutil.which("pmxtjs")
-    if pmxt_path:
-        check("pmxtjs sidecar", PASS, pmxt_path)
-    else:
-        check(
-            "pmxtjs sidecar",
-            FAIL,
-            "not found — run: npm install -g pmxtjs",
-        )
-
-    # ---- Python package ----
-    console.print("\n[bold]Python package[/bold]")
-    try:
-        import arbscanner  # noqa: F401
-        check("arbscanner importable", PASS)
-    except ImportError as exc:
-        check("arbscanner importable", FAIL, str(exc))
-
-    try:
-        import sentence_transformers  # noqa: F401
-        check("sentence-transformers", PASS)
-    except ImportError:
-        check(
-            "sentence-transformers",
-            FAIL,
-            "run: uv sync  (or pip install sentence-transformers)",
-        )
-
-    try:
-        import anthropic  # noqa: F401
-        check("anthropic SDK", PASS)
-    except ImportError:
-        check("anthropic SDK", WARN, "LLM-assisted matching disabled — run: uv sync")
-
-    # ---- Data directory ----
-    console.print("\n[bold]Data directory[/bold]")
-    if DATA_DIR.exists():
-        check("data/ directory", PASS, str(DATA_DIR))
-    else:
-        check(
-            "data/ directory",
-            WARN,
-            f"missing — will be created on first `arbscanner match` run",
-        )
-
-    if MATCHED_PAIRS_PATH.exists():
-        try:
-            import json
-            cache = json.loads(MATCHED_PAIRS_PATH.read_text())
-            n = len(cache.get("pairs", []))
-            check("matched_pairs.json", PASS, f"{n} confirmed pair(s)")
-        except Exception as exc:
-            check("matched_pairs.json", WARN, f"unreadable: {exc}")
-    else:
-        check(
-            "matched_pairs.json",
-            WARN,
-            "missing — run: arbscanner match  to build the pair cache",
-        )
-
-    # ---- Database ----
-    console.print("\n[bold]Database[/bold]")
-    if DB_PATH.exists():
-        try:
-            conn = sqlite3.connect(str(DB_PATH))
-            tables = [
-                r[0]
-                for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            ]
-            conn.close()
-            check("arbscanner.db", PASS, f"tables: {', '.join(sorted(tables)) or 'none'}")
-        except Exception as exc:
-            check("arbscanner.db", FAIL, str(exc))
-    else:
-        check(
-            "arbscanner.db",
-            WARN,
-            "not found — will be created on first `arbscanner scan` run",
-        )
-
-    # ---- Optional env vars ----
-    console.print("\n[bold]Optional credentials[/bold]")
-    import os
-
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if anthropic_key:
-        check("ANTHROPIC_API_KEY", PASS, f"set ({len(anthropic_key)} chars)")
-    else:
-        check(
-            "ANTHROPIC_API_KEY",
-            WARN,
-            "not set — LLM confirmation for ambiguous pairs disabled",
-        )
-
-    for var in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL"):
-        val = os.getenv(var, "")
-        if val:
-            check(var, PASS, f"set ({len(val)} chars)")
-        else:
-            check(var, WARN, "not set — alerts to this channel disabled")
-
-    # ---- Live execution credentials ----
-    console.print("\n[bold]Live execution credentials (--live flag)[/bold]")
-    poly_missing = [v for v in POLY_CRED_VARS if not os.getenv(v)]
-    kalshi_missing = [v for v in KALSHI_CRED_VARS if not os.getenv(v)]
-    if not poly_missing:
-        check("Polymarket credentials", PASS, ", ".join(POLY_CRED_VARS))
-    else:
-        check(
-            "Polymarket credentials",
-            WARN,
-            f"missing: {', '.join(poly_missing)} (only needed for --live)",
-        )
-    if not kalshi_missing:
-        check("Kalshi credentials", PASS, ", ".join(KALSHI_CRED_VARS))
-    else:
-        check(
-            "Kalshi credentials",
-            WARN,
-            f"missing: {', '.join(kalshi_missing)} (only needed for --live)",
-        )
-
-    # ---- Exchange connectivity (read-only) ----
-    if not args.skip_connectivity:
-        console.print("\n[bold]Exchange connectivity (read-only)[/bold]")
-        try:
-            import pmxt
-
-            poly = pmxt.Polymarket()
-            result = poly.fetch_markets_paginated(limit=1)
-            n = len(result.data)
-            check("Polymarket API", PASS, f"returned {n} market(s)")
-        except Exception as exc:
-            msg = str(exc)[:80]
-            check("Polymarket API", FAIL, f"{msg} — is pmxtjs sidecar running?")
-
-        try:
-            import pmxt
-
-            kalshi = pmxt.Kalshi()
-            result = kalshi.fetch_markets_paginated(limit=1)
-            n = len(result.data)
-            check("Kalshi API", PASS, f"returned {n} market(s)")
-        except Exception as exc:
-            msg = str(exc)[:80]
-            check("Kalshi API", FAIL, f"{msg} — is pmxtjs sidecar running?")
-    else:
-        console.print("\n[dim]Skipping connectivity checks (--skip-connectivity)[/dim]")
-
-    # ---- Summary ----
-    console.print()
-    if failures:
-        console.print(
-            f"[bold red]{len(failures)} check(s) FAILED:[/bold red] "
-            + ", ".join(failures)
-        )
-        console.print("Fix the items above and re-run [bold]arbscanner doctor[/bold].\n")
-        sys.exit(1)
-    else:
-        console.print("[bold green]All checks passed.[/bold green] Ready to scan.\n")
 
 
 def cmd_backup(args: argparse.Namespace) -> None:
@@ -1002,13 +807,12 @@ def main() -> None:
 
     # doctor command
     doctor_parser = subparsers.add_parser(
-        "doctor",
-        help="Check runtime environment: Node/pmxtjs, data dir, credentials, connectivity",
+        "doctor", help="Preflight: validate env, deps, sidecar, and data files"
     )
     doctor_parser.add_argument(
-        "--skip-connectivity",
+        "--network",
         action="store_true",
-        help="Skip live API connectivity checks (faster; useful in CI or offline)",
+        help="Also probe Polymarket + Kalshi via pmxt (requires network)",
     )
 
     # backup command

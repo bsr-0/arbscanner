@@ -183,6 +183,52 @@ def test_candidate_to_matched_pair_carries_calibration_metadata():
     assert pair.resolution_date == "2026-06-15T00:00:00Z"
 
 
+def test_confirm_matches_llm_no_key_keeps_only_high_confidence(monkeypatch):
+    """Without an ANTHROPIC_API_KEY, we keep only pairs above llm_confirm_high.
+
+    The old behavior auto-accepted every candidate above the embedding
+    threshold, which in no-key mode silently flooded the cache with
+    ambiguous [0.7, 0.9) pairs that nothing could adjudicate. The new
+    behavior drops that ambiguous band — you get fewer matches, but every
+    match is high-confidence.
+    """
+    from arbscanner import matcher
+    from arbscanner.models import CandidatePair
+
+    def _cand(sim: float, poly_id: str, kalshi_id: str) -> CandidatePair:
+        return CandidatePair(
+            poly_market_id=poly_id,
+            poly_title="x",
+            poly_description="",
+            poly_resolution_date="",
+            poly_yes_outcome_id="py",
+            poly_no_outcome_id="pn",
+            kalshi_market_id=kalshi_id,
+            kalshi_title="KX",
+            kalshi_description="",
+            kalshi_resolution_date="",
+            kalshi_yes_outcome_id="ky",
+            kalshi_no_outcome_id="kn",
+            similarity=sim,
+            poly_category="",
+            kalshi_category="",
+        )
+
+    monkeypatch.setattr(matcher.settings, "anthropic_api_key", "")
+    # llm_confirm_high defaults to 0.9.
+    candidates = [
+        _cand(0.95, "p1", "k1"),  # high-confidence, kept
+        _cand(0.90, "p2", "k2"),  # exactly at the floor, kept
+        _cand(0.85, "p3", "k3"),  # ambiguous band, dropped without LLM
+        _cand(0.72, "p4", "k4"),  # low, dropped
+    ]
+
+    result = matcher.confirm_matches_llm(candidates)
+
+    assert [c.poly_market_id for c, accepted in result if accepted] == ["p1", "p2"]
+    assert all(accepted for _, accepted in result)
+
+
 def test_candidate_to_matched_pair_prefers_non_empty_category():
     """If poly category is empty, we fall back to the kalshi category."""
     from arbscanner.matcher import candidate_to_matched_pair

@@ -129,8 +129,15 @@ def confirm_matches_llm(candidates: list[CandidatePair]) -> list[tuple[Candidate
     Returns list of (candidate, accepted) tuples.
     """
     if not settings.anthropic_api_key:
-        logger.warning("No ANTHROPIC_API_KEY set — auto-accepting all candidates")
-        return [(c, True) for c in candidates]
+        logger.warning(
+            "No ANTHROPIC_API_KEY set — keeping only high-confidence matches "
+            "(similarity >= %.2f); ambiguous pairs in [%.2f, %.2f) are dropped "
+            "because there is no LLM to adjudicate them",
+            settings.llm_confirm_high,
+            settings.llm_confirm_low,
+            settings.llm_confirm_high,
+        )
+        return [(c, True) for c in candidates if c.similarity >= settings.llm_confirm_high]
 
     auto_accept = []
     needs_llm = []
