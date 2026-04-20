@@ -4,7 +4,7 @@
 .DEFAULT_GOAL := help
 
 .PHONY: help install install-node test test-fast lint format scan match serve \
-        clean clean-data docker-build docker-run docker-logs
+        doctor clean clean-data docker-build docker-run docker-logs
 
 help: ## Show this help message
 	@echo "arbscanner - available targets:"
@@ -16,6 +16,7 @@ help: ## Show this help message
 	@echo "  test-fast     Run tests, failing fast and prioritizing last failures"
 	@echo "  lint          Lint src/ and tests/ with ruff"
 	@echo "  format        Format src/ and tests/ with ruff"
+	@echo "  doctor        Check environment: Node/pmxtjs, data dir, credentials, connectivity"
 	@echo "  scan          Run the live arb scanner dashboard"
 	@echo "  match         Run the market matching pipeline"
 	@echo "  serve         Start the FastAPI web server with auto-reload"
@@ -43,6 +44,9 @@ lint: ## Lint src/ and tests/ with ruff
 
 format: ## Format src/ and tests/ with ruff
 	uv run ruff format src/ tests/
+
+doctor: ## Check environment: Node/pmxtjs, data dir, credentials, connectivity
+	uv run arbscanner doctor
 
 scan: ## Run the live arb scanner dashboard
 	uv run arbscanner scan
