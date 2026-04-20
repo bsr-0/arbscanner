@@ -178,57 +178,117 @@ def check_node() -> CheckResult:
     return CheckResult(name="node", severity="ok", message=f"Node.js v{raw}")
 
 
+def _warn_pmxtjs_off_path(candidate: Path) -> CheckResult:
+    bin_dir = candidate.parent
+    return CheckResult(
+        name="pmxtjs",
+        severity="warn",
+        message=f"pmxtjs installed at {candidate} but not on shell PATH",
+        fix=(
+            f'Add the npm global bin to PATH: `export PATH="{bin_dir}:$PATH"` '
+            "(then add that line to ~/.zshrc or ~/.bashrc)"
+        ),
+    )
+
+
 def check_pmxtjs() -> CheckResult:
     """The Node sidecar binary ``pmxtjs`` must be globally installed.
 
-    Two discovery paths are worth checking:
+    Discovery order (first match wins):
 
-    1. Shell ``PATH`` — the common case. If ``shutil.which`` finds it,
-       we're done.
-    2. ``npm config get prefix`` — npm's global install location. On
-       macOS with nvm/asdf/homebrew-managed Node, the npm prefix often
-       isn't on the shell ``PATH`` that the user's terminal sees,
-       *but* pmxt's own Node child process still finds the binary fine
-       because Node looks it up via its own module/bin resolution.
+    1. Shell ``PATH`` — the common case.
+    2. ``npm config get prefix`` / ``bin/`` — covers standard global installs.
+    3. ``npm ls -g pmxtjs --parseable`` — resolves the actual package dir,
+       which lets us derive the bin path for nvm/volta-managed installations
+       where the prefix changes per Node version.
+    4. Common macOS install locations (homebrew, custom npm-global prefix).
+    5. pmxt import probe — if pmxt itself can import, the sidecar is
+       accessible to the scanner regardless of shell PATH. Downgrade to
+       ``warn`` so the user knows to fix PATH but scanning won't be blocked.
 
-    So if we find pmxtjs via the npm prefix but not on ``PATH``, we
-    emit a ``warn`` (not ``fail``) — scanning will work, but interactive
-    shell invocations of ``pmxtjs`` won't. ``--network`` is the
-    authoritative test regardless.
+    ``warn`` means scanning works; ``fail`` means pmxtjs is genuinely missing.
     """
     bin_path = shutil.which("pmxtjs")
     if bin_path:
         return CheckResult(name="pmxtjs", severity="ok", message=f"pmxtjs at {bin_path}")
 
-    # Fallback: probe npm's global prefix. This handles the common case
-    # where nvm/asdf/homebrew installed node in a location the user's
-    # shell rc doesn't export onto PATH.
     npm = shutil.which("npm")
     if npm:
+        # 2. npm config get prefix
         try:
             out = subprocess.run(
                 [npm, "config", "get", "prefix"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=5,
+                check=True, capture_output=True, text=True, timeout=5,
             )
-            prefix = Path(out.stdout.strip())
-            candidate = prefix / "bin" / "pmxtjs"
+            candidate = Path(out.stdout.strip()) / "bin" / "pmxtjs"
             if candidate.exists():
+                return _warn_pmxtjs_off_path(candidate)
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        # 3. npm ls -g --parseable: works for nvm/volta where the prefix is
+        #    per-version and not the same as the shell PATH entry.
+        try:
+            ls = subprocess.run(
+                [npm, "ls", "-g", "pmxtjs", "--parseable", "--depth=0"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in ls.stdout.strip().splitlines():
+                pkg_dir = Path(line.strip())
+                # npm returns the package dir, e.g.:
+                #   nvm:  ~/.nvm/versions/node/v20/lib/node_modules/pmxtjs
+                #   std:  /usr/local/lib/node_modules/pmxtjs
+                # The global bin lives at <version-root>/bin/ or <prefix>/bin/.
+                for candidate in [
+                    pkg_dir.parent.parent.parent / "bin" / "pmxtjs",  # nvm layout
+                    pkg_dir.parent.parent / "bin" / "pmxtjs",         # standard layout
+                    pkg_dir.parent / ".bin" / "pmxtjs",               # node_modules/.bin
+                ]:
+                    if candidate.exists():
+                        return _warn_pmxtjs_off_path(candidate)
+            # Package listed but binary location not resolved — still a warn.
+            if ls.returncode == 0 and "pmxtjs" in ls.stdout:
                 return CheckResult(
                     name="pmxtjs",
                     severity="warn",
-                    message=f"pmxtjs installed at {candidate} but not on shell PATH",
+                    message="pmxtjs is globally installed but binary is not on shell PATH",
                     fix=(
-                        f"Add the npm global bin to PATH: "
-                        f'`export PATH="{prefix}/bin:$PATH"` '
-                        "(then add that to ~/.zshrc or ~/.bashrc)"
+                        'Run: export PATH="$(npm config get prefix)/bin:$PATH"  '
+                        "then add that line to ~/.zshrc"
                     ),
                 )
         except (subprocess.SubprocessError, OSError):
-            # npm is flaky or missing — fall through to the fail below.
             pass
+
+    # 4. Common macOS install locations.
+    for candidate in [
+        Path("/opt/homebrew/bin/pmxtjs"),       # Apple Silicon homebrew
+        Path("/usr/local/bin/pmxtjs"),           # Intel homebrew / direct install
+        Path.home() / ".npm-global" / "bin" / "pmxtjs",  # custom npm prefix
+    ]:
+        if candidate.exists():
+            return _warn_pmxtjs_off_path(candidate)
+
+    # 5. If pmxt itself imports cleanly, the sidecar is reachable by the
+    #    scanner process — shell PATH is the only thing missing.
+    try:
+        import importlib.util as _ilu
+        if _ilu.find_spec("pmxt") is not None:
+            import pmxt as _pmxt  # noqa: F401
+            return CheckResult(
+                name="pmxtjs",
+                severity="warn",
+                message=(
+                    "pmxtjs not on shell PATH but pmxt imports successfully — "
+                    "scanning will work; shell invocations of pmxtjs won't"
+                ),
+                fix=(
+                    'Run: export PATH="$(npm config get prefix)/bin:$PATH"  '
+                    "then add that line to ~/.zshrc or ~/.bashrc"
+                ),
+            )
+    except Exception:
+        pass
 
     return CheckResult(
         name="pmxtjs",
