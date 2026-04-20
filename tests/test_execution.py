@@ -515,3 +515,228 @@ def test_execution_result_timestamp_is_iso8601():
     # Just verify it parses back.
     parsed = datetime.fromisoformat(ts)
     assert parsed.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase A.2 — live execution
+# ---------------------------------------------------------------------------
+
+from arbscanner.execution import _place_live_order
+from arbscanner.exchanges import CredentialError, validate_credentials
+
+
+def _make_mock_order(status="filled", filled=10.0, remaining=0.0, fee=0.004):
+    """Return a MagicMock that looks like a pmxt Order."""
+    order = MagicMock()
+    order.status = status
+    order.filled = filled
+    order.remaining = remaining
+    order.fee = fee
+    return order
+
+
+def test_place_live_order_calls_create_order():
+    exchange = MagicMock()
+    exchange.create_order.return_value = _make_mock_order()
+
+    result = _place_live_order(
+        exchange=exchange,
+        exchange_name="polymarket",
+        market_id="poly_1",
+        outcome_id="py1",
+        side="buy",
+        order_type="limit",
+        amount=10.0,
+        price=0.40,
+        fee_rate_fn=lambda p: p * 0.001,
+    )
+
+    exchange.create_order.assert_called_once_with(
+        market_id="poly_1",
+        outcome_id="py1",
+        side="buy",
+        type="limit",
+        amount=10.0,
+        price=0.40,
+    )
+    assert result.status == "filled"
+    assert result.filled == 10.0
+    assert result.dry_run is False
+    assert result.exchange == "polymarket"
+
+
+def test_place_live_order_uses_fee_from_order():
+    exchange = MagicMock()
+    exchange.create_order.return_value = _make_mock_order(fee=0.123)
+
+    result = _place_live_order(
+        exchange=exchange,
+        exchange_name="kalshi",
+        market_id="k_1",
+        outcome_id="kn1",
+        side="buy",
+        order_type="limit",
+        amount=5.0,
+        price=0.50,
+        fee_rate_fn=lambda p: 0.035,
+    )
+    assert result.fee == pytest.approx(0.123)
+
+
+def test_place_live_order_falls_back_to_fee_rate_fn_when_fee_is_none():
+    exchange = MagicMock()
+    order = _make_mock_order(fee=None, filled=5.0)
+    exchange.create_order.return_value = order
+
+    result = _place_live_order(
+        exchange=exchange,
+        exchange_name="kalshi",
+        market_id="k_1",
+        outcome_id="kn1",
+        side="buy",
+        order_type="limit",
+        amount=5.0,
+        price=0.50,
+        fee_rate_fn=lambda p: 0.035,
+    )
+    # fee_rate_fn(0.50) * filled = 0.035 * 5.0
+    assert result.fee == pytest.approx(0.035 * 5.0)
+
+
+def test_execute_plan_live_calls_create_order_on_both_legs():
+    poly = MagicMock()
+    kalshi = MagicMock()
+    poly.create_order.return_value = _make_mock_order(filled=10.0, fee=0.004)
+    kalshi.create_order.return_value = _make_mock_order(filled=10.0, fee=0.035)
+
+    plan = _ready_plan()
+    result = execute_plan(plan, poly_exchange=poly, kalshi_exchange=kalshi, dry_run=False)
+
+    assert poly.create_order.called
+    assert kalshi.create_order.called
+    assert result.result == "success"
+    assert result.dry_run is False
+    assert result.leg1.dry_run is False
+    assert result.leg2.dry_run is False
+
+
+def test_execute_plan_live_unwind_calls_create_order_sell():
+    poly = MagicMock()
+    kalshi = MagicMock()
+    poly.create_order.return_value = _make_mock_order(filled=10.0, fee=0.004)
+    # First call: leg 2 rejected
+    kalshi.create_order.return_value = _make_mock_order(status="rejected", filled=0.0, fee=0.0)
+
+    bid_book = MockBook(bids=[MockLevel(0.38, 100)], asks=[])
+
+    with patch("arbscanner.execution.fetch_order_book_safe", return_value=bid_book):
+        plan = _ready_plan()
+        result = execute_plan(
+            plan,
+            poly_exchange=poly,
+            kalshi_exchange=kalshi,
+            simulate_leg2_failure=True,
+            dry_run=False,
+        )
+
+    # Leg 2 was forced rejected by simulate_leg2_failure; in live mode _dispatch_order
+    # skips force_rejection (only applies in dry-run), so kalshi.create_order was called.
+    # The unwind should have triggered a second poly sell order.
+    assert result.unwind_triggered is True
+    assert poly.create_order.call_count == 2
+    sell_call = poly.create_order.call_args_list[1]
+    assert sell_call.kwargs.get("side") == "sell" or sell_call[1].get("side") == "sell"
+
+
+def test_execute_plan_live_requires_both_exchange_instances():
+    plan = _ready_plan()
+    result = execute_plan(plan, poly_exchange=None, kalshi_exchange=None, dry_run=False)
+    assert result.result == "error"
+    assert "authenticated" in result.error_message.lower()
+
+
+def test_execute_plan_live_requires_poly_exchange():
+    plan = _ready_plan()
+    result = execute_plan(plan, poly_exchange=None, kalshi_exchange=MagicMock(), dry_run=False)
+    assert result.result == "error"
+
+
+def test_log_execution_live_records_dry_run_false():
+    poly = MagicMock()
+    kalshi = MagicMock()
+    poly.create_order.return_value = _make_mock_order(filled=10.0, fee=0.004)
+    kalshi.create_order.return_value = _make_mock_order(filled=10.0, fee=0.035)
+
+    plan = _ready_plan()
+    result = execute_plan(plan, poly_exchange=poly, kalshi_exchange=kalshi, dry_run=False)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "exec.db"
+        conn = get_connection(db_path)
+        try:
+            row_id = log_execution(conn, result)
+            row = conn.execute(
+                "SELECT dry_run FROM execution_log WHERE id = ?", (row_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+
+    assert row[0] == 0  # live execution logged as dry_run=0
+
+
+def test_format_execution_report_live_says_live_execution():
+    poly = MagicMock()
+    kalshi = MagicMock()
+    poly.create_order.return_value = _make_mock_order(filled=10.0, fee=0.004)
+    kalshi.create_order.return_value = _make_mock_order(filled=10.0, fee=0.035)
+
+    plan = _ready_plan()
+    result = execute_plan(plan, poly_exchange=poly, kalshi_exchange=kalshi, dry_run=False)
+    text = format_execution_report(result)
+
+    assert "LIVE EXECUTION" in text
+    assert "DRY RUN" not in text
+
+
+def test_validate_credentials_returns_missing_vars(monkeypatch):
+    for var in ("POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE",
+                "POLY_PRIVATE_KEY", "KALSHI_API_KEY", "KALSHI_PRIVATE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    missing = validate_credentials()
+    assert "POLY_API_KEY" in missing
+    assert "KALSHI_PRIVATE_KEY" in missing
+
+
+def test_validate_credentials_returns_empty_when_all_set(monkeypatch):
+    for var in ("POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE",
+                "POLY_PRIVATE_KEY", "KALSHI_API_KEY", "KALSHI_PRIVATE_KEY"):
+        monkeypatch.setenv(var, "test-value")
+
+    missing = validate_credentials()
+    assert missing == []
+
+
+def test_create_authenticated_exchanges_raises_on_missing_creds(monkeypatch):
+    from arbscanner.exchanges import create_authenticated_exchanges
+    for var in ("POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE",
+                "POLY_PRIVATE_KEY", "KALSHI_API_KEY", "KALSHI_PRIVATE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    with pytest.raises(CredentialError):
+        create_authenticated_exchanges()
+
+
+def test_dry_run_still_never_calls_create_order_by_default():
+    """Regression: default execute_plan must not call create_order."""
+    poly = MagicMock()
+    kalshi = MagicMock()
+    plan = _ready_plan()
+
+    execute_plan(plan, poly_exchange=poly, kalshi_exchange=kalshi)
+    assert not poly.create_order.called
+    assert not kalshi.create_order.called
+
+    execute_plan(plan, poly_exchange=poly, kalshi_exchange=kalshi, simulate_leg2_failure=True)
+    assert not poly.create_order.called
+    assert not kalshi.create_order.called

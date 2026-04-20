@@ -382,15 +382,14 @@ def _print_paper_positions(engine, status: str) -> None:
 
 
 def cmd_execute(args: argparse.Namespace) -> None:
-    """Run the dry-run execution pipeline against a logged opportunity.
+    """Run the execution pipeline against a logged opportunity.
 
-    Phase A ships dry-run only: the full planning + simulation + unwind
-    pipeline runs without ever calling ``pmxt.*.create_order``. No
-    credentials are required and no financial risk is taken. Live execution
-    is a deliberately separate Phase A.2.
+    By default runs in dry-run mode (no real orders). Pass ``--live`` to
+    place real orders via pmxt; this requires exchange credentials in env vars
+    and an explicit double-confirmation from the operator.
     """
+    from arbscanner.exchanges import CredentialError, create_authenticated_exchanges, validate_credentials
     from arbscanner.execution import (
-        EXECUTION_MODE,
         PlanRejection,
         execute_plan,
         format_execution_report,
@@ -400,9 +399,7 @@ def cmd_execute(args: argparse.Namespace) -> None:
     )
     from arbscanner.matcher import load_cache
 
-    if EXECUTION_MODE != "dry_run":
-        console.print("[red]Execution module is not in dry-run mode. Aborting.[/red]")
-        sys.exit(1)
+    live = getattr(args, "live", False)
 
     opp = _load_opportunity(args.opportunity_id)
     if opp is None:
@@ -428,15 +425,29 @@ def cmd_execute(args: argparse.Namespace) -> None:
             f"Run `arbscanner match` to refresh.[/yellow]"
         )
 
-    console.print(
-        f"[bold]Planning dry-run execution for opportunity #{args.opportunity_id}[/bold]"
-    )
+    mode_label = "[bold red]LIVE[/bold red]" if live else "[bold]dry-run[/bold]"
+    console.print(f"Planning {mode_label} execution for opportunity #{args.opportunity_id}")
     console.print(f"  Market: {opp.poly_title}")
     console.print(f"  Direction: {opp.direction}")
     console.print(f"  Logged prices: poly={opp.poly_price:.3f} kalshi={opp.kalshi_price:.3f}")
-    console.print("  Re-fetching current order books...")
 
-    poly_exchange, kalshi_exchange = create_exchanges()
+    if live:
+        missing = validate_credentials()
+        if missing:
+            console.print(
+                f"[red]Live execution requires credentials. "
+                f"Missing env vars: {', '.join(missing)}[/red]"
+            )
+            sys.exit(1)
+        try:
+            poly_exchange, kalshi_exchange = create_authenticated_exchanges()
+        except CredentialError as e:
+            console.print(f"[red]Credential error: {e}[/red]")
+            sys.exit(1)
+    else:
+        poly_exchange, kalshi_exchange = create_exchanges()
+
+    console.print("  Re-fetching current order books...")
 
     plan_or_rejection = plan_execution(
         opp,
@@ -462,21 +473,40 @@ def cmd_execute(args: argparse.Namespace) -> None:
     )
 
     if not args.yes:
-        console.print(
-            "\n[bold yellow]About to run dry-run simulation. "
-            "No real orders will be placed.[/bold yellow]"
-        )
-        confirm = input("Proceed? [y/N]: ").strip().lower()
-        if confirm not in ("y", "yes"):
-            console.print("[dim]Aborted by user.[/dim]")
-            return
+        if live:
+            console.print(
+                "\n[bold red]WARNING: LIVE EXECUTION MODE.[/bold red] "
+                "Real orders will be placed and capital will be at risk."
+            )
+            confirm1 = input("Type 'LIVE' to confirm: ").strip()
+            if confirm1 != "LIVE":
+                console.print("[dim]Aborted.[/dim]")
+                return
+            confirm2 = input("Are you sure? [y/N]: ").strip().lower()
+            if confirm2 not in ("y", "yes"):
+                console.print("[dim]Aborted.[/dim]")
+                return
+        else:
+            console.print(
+                "\n[bold yellow]About to run dry-run simulation. "
+                "No real orders will be placed.[/bold yellow]"
+            )
+            confirm = input("Proceed? [y/N]: ").strip().lower()
+            if confirm not in ("y", "yes"):
+                console.print("[dim]Aborted by user.[/dim]")
+                return
 
     result = execute_plan(
         plan,
         poly_exchange=poly_exchange,
         kalshi_exchange=kalshi_exchange,
         simulate_leg2_failure=args.simulate_leg2_failure,
+        dry_run=not live,
     )
+
+    conn = get_exec_connection()
+    log_execution(conn, result)
+    conn.close()
 
     console.print()
     console.print(format_execution_report(result))
@@ -705,12 +735,12 @@ def main() -> None:
     # execute command
     execute_parser = subparsers.add_parser(
         "execute",
-        help="Dry-run the execution pipeline against a logged opportunity",
+        help="Run the execution pipeline against a logged opportunity (dry-run by default)",
     )
     execute_parser.add_argument(
         "opportunity_id",
         type=int,
-        help="ID of the logged opportunity to dry-run execute",
+        help="ID of the logged opportunity to execute",
     )
     execute_parser.add_argument(
         "--max-trade-usd",
@@ -721,12 +751,21 @@ def main() -> None:
     execute_parser.add_argument(
         "--yes",
         action="store_true",
-        help="Skip the interactive 'proceed?' confirmation",
+        help="Skip the interactive confirmation prompt",
+    )
+    execute_parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Place real orders via pmxt (Phase A.2). Requires POLY_API_KEY, "
+            "POLY_API_SECRET, POLY_PASSPHRASE, POLY_PRIVATE_KEY, KALSHI_API_KEY, "
+            "KALSHI_PRIVATE_KEY in the environment. Operator will be prompted twice."
+        ),
     )
     execute_parser.add_argument(
         "--simulate-leg2-failure",
         action="store_true",
-        help="Force the second leg to reject (exercises the unwind path)",
+        help="Force the second leg to reject (exercises the unwind path; dry-run only)",
     )
 
     # backtest command
