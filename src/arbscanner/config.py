@@ -47,6 +47,14 @@ class Settings:
         default_factory=lambda: os.getenv("STRIPE_WEBHOOK_SECRET", "")
     )
     stripe_price_id: str = field(default_factory=lambda: os.getenv("STRIPE_PRICE_ID", ""))
+    # Stripe requires absolute URLs for success/cancel redirects on Checkout
+    # Sessions. Set ARBSCANNER_PUBLIC_URL to the externally-reachable base
+    # URL of this deployment (e.g. https://arbscanner.example.com). Defaults
+    # to http://localhost:8000 for local dev; leaving it at the default in
+    # production produces redirects back to localhost after checkout.
+    public_url: str = field(
+        default_factory=lambda: os.getenv("ARBSCANNER_PUBLIC_URL", "http://localhost:8000")
+    )
 
     # Web
     secret_key: str = field(

@@ -29,7 +29,7 @@ Every candidate opportunity is scored against a historical calibration layer der
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| Python      | 3.12+   | Managed via `uv` |
+| Python      | 3.12.x  | Pinned in `.python-version`; 3.13+ doesn't have torch 2.2.2 wheels. Use `uv python install 3.12` |
 | Node.js     | 18+     | Required by the `pmxtjs` sidecar used by `pmxt` |
 | uv          | latest  | Python package + project manager |
 | Anthropic API key | —  | Only needed for LLM-assisted match confirmation |
@@ -45,16 +45,25 @@ The `pmxt` Python library shells out to a Node.js sidecar (`pmxtjs`) to talk to 
 git clone https://github.com/YOUR-ORG/arbscanner.git
 cd arbscanner
 
-# 2. Install Python deps (creates .venv automatically)
+# 2. Install Python 3.12 if you don't have it. `.python-version` pins
+#    the project to 3.12.x, and `tool.uv.python-preference = "only-managed"`
+#    forces uv to use its own interpreter (not conda, not system Python).
+uv python install 3.12
+
+# 3. Install Python deps (creates .venv automatically using 3.12)
 uv sync
 
-# 3. Install the Node.js sidecar required by pmxt
+# 4. Install the Node.js sidecar required by pmxt
 npm install -g pmxtjs
 
-# 4. Copy the env template and fill in any keys you need
+# 5. Copy the env template and fill in any keys you need
 cp .env.example .env
 $EDITOR .env
 ```
+
+**Conda users**: `tool.uv.python-preference = "only-managed"` means `uv sync` ignores your active conda env. If you want to use your conda Python instead, pass `--python /path/to/python3.12` explicitly. Otherwise just let uv manage it.
+
+**Intel Mac (`x86_64`) users**: PyTorch dropped macOS x86_64 wheels after 2.2.2, and the rest of the ML stack has moved on from it. The supported path for Intel Macs is Docker — `docker compose up --build` works out of the box. Native Intel-Mac installs are possible by pinning `torch<=2.2.2`, `numpy<2`, and `transformers<4.50` in your local `pyproject.toml`, but that path isn't shipped here.
 
 The scanner runs in read-only mode by default — you only need exchange private keys if you plan to add execution later. `ANTHROPIC_API_KEY` is strongly recommended so the matcher can confirm ambiguous pairs.
 
@@ -72,20 +81,23 @@ uv sync
 npm install -g pmxtjs
 cp .env.example .env   # add ANTHROPIC_API_KEY
 
-# 1. Build the matched-pair map (run once, then occasionally)
+# 1. Verify the environment is good to go (fails fast with a fix-it list)
+uv run arbscanner doctor
+
+# 2. Build the matched-pair map (run once, then occasionally)
 uv run arbscanner match
 
-# 2. Inspect the matches the pipeline produced
+# 3. Inspect the matches the pipeline produced
 uv run arbscanner pairs
 
-# 3. Start the live terminal scanner (refreshes every 30s by default)
+# 4. Start the live terminal scanner (refreshes every 30s by default)
 uv run arbscanner scan --interval 30 --threshold 0.01
 
-# 4. In another terminal, start the FastAPI web dashboard
+# 5. In another terminal, start the FastAPI web dashboard
 uv run arbscanner serve --port 8000
 #    open http://localhost:8000/dashboard
 
-# 5. (Optional) Ingest historical resolutions for calibration context
+# 6. (Optional) Ingest historical resolutions for calibration context
 uv run arbscanner calibrate --ingest-live --limit 500
 ```
 
@@ -99,6 +111,28 @@ The top-level command is `arbscanner` (installed as a script by `uv sync`). All 
 
 ```bash
 uv run arbscanner <command> [flags]
+```
+
+### `arbscanner doctor` — preflight check
+
+Validates every runtime prerequisite a fresh checkout needs *before* you run `scan` or `match`. Prints a table of check results and a fix-it punch list, then exits non-zero if any hard prerequisite is missing.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--network` | off | Also round-trip a single market fetch through pmxt against Polymarket + Kalshi |
+
+Offline checks cover Python version, `pmxt` importability, Node.js and `pmxtjs` on `PATH`, the `.env` file, `ANTHROPIC_API_KEY`, the matched-pair cache, SQLite writability, calibration data, and alert sinks (including the free-tier-silences-alerts foot-gun).
+
+Exit codes:
+- `0` — all checks passed, or only warnings/info remain (e.g. empty cache on a fresh checkout).
+- `1` — at least one hard prerequisite is missing; the scanner will not run until you address the reported items.
+
+```bash
+# Fast offline check (no network, no credentials needed)
+uv run arbscanner doctor
+
+# Also prove Polymarket + Kalshi are reachable via the Node sidecar
+uv run arbscanner doctor --network
 ```
 
 ### `arbscanner scan` — live arb scanner
@@ -162,6 +196,12 @@ uv run arbscanner serve --host 0.0.0.0 --port 8000
 
 # Development with hot reload
 uv run arbscanner serve --reload
+```
+
+Every instance also exposes `/metrics` in Prometheus text exposition format (version 0.0.4). Scan cycles, order-book fetches, rate-limit waits, alerts delivered, and the scan-cycle duration histogram are all populated by `arbscanner.engine`; scraping `http://<host>:8000/metrics` at your preferred interval gets a fleet view without extra configuration:
+
+```bash
+curl -s http://localhost:8000/metrics | head -20
 ```
 
 ### `arbscanner paper` — paper trading account
@@ -348,6 +388,7 @@ All configuration is driven by environment variables loaded from `.env` (see `.e
 | `STRIPE_SECRET_KEY` | Optional | Stripe secret key for the paid-tier landing page |
 | `STRIPE_WEBHOOK_SECRET` | Optional | Stripe webhook signing secret |
 | `STRIPE_PRICE_ID` | Optional | Stripe price ID for the subscription |
+| `ARBSCANNER_PUBLIC_URL` | If Stripe enabled | Absolute base URL (e.g. `https://arbscanner.example.com`) used to build Stripe Checkout success/cancel redirects. Default `http://localhost:8000` |
 | `ARBSCANNER_SECRET_KEY` | Recommended | Session secret for the FastAPI web app |
 | `ARBSCANNER_TIER` | Optional | `pro` (default) or `free`. Enforces the landing-page free-tier caps: top 3 opportunities, 5-minute delayed view, no Telegram/Discord alerts, no calibration context. Individual requests can override with an `X-Arbscanner-Tier` header. |
 

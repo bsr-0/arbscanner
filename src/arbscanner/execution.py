@@ -1,31 +1,28 @@
-"""Arb execution pipeline — Phase A, dry-run only.
+"""Arb execution pipeline — Phase A (dry-run) and Phase A.2 (live).
 
 CLAUDE.md's Delivery block lists "v3: One-click execution via pmxt" as the
-final delivery milestone. This module delivers **Phase A**: the full
-execution pipeline (planning, safety checks, two-leg placement, partial-fill
-unwind, audit logging) running entirely in **dry-run mode**. No real
-``pmxt.*.create_order`` calls are made, no credentials are needed, and no
-financial risk is taken. The hooks for a later Phase A.2 that flips the
-dry-run switch off are explicit, but that flip is out of scope here.
+final delivery milestone. This module delivers the full execution pipeline:
+planning, safety checks, two-leg placement, partial-fill unwind, and audit
+logging. It runs in dry-run mode by default; pass ``dry_run=False`` (and
+supply authenticated exchange instances) to place real orders.
 
-Design choices (from user input before implementation):
+Design choices:
 
-* **Dry-run only.** The real ``create_order`` code path is not built —
-  this module owns the planning and simulation layer, not live trading.
-* **Immediate market-order unwind on partial fill.** If leg 1 simulates
-  a fill but leg 2 fails, we plan an immediate market unwind of leg 1
-  and record the realized slippage. Tests use the ``simulate_leg2_failure``
-  hook on :func:`execute_plan` to exercise this path deterministically.
-* **CLI-only trigger.** There is no HTTP execution endpoint and no
-  scan-loop auto-trigger in Phase A — execution is always initiated
-  interactively by an operator via ``arbscanner execute <id>``.
-* **Hard $100 per-trade cap by default.** Raised via the
-  ``--max-trade-usd`` CLI flag. Every plan re-checks the cap after
-  sizing against available liquidity.
+* **Dry-run default.** ``execute_plan(dry_run=True)`` simulates every order
+  without calling ``pmxt.*.create_order``. No credentials needed.
+* **Live via ``dry_run=False``.** ``execute_plan(dry_run=False)`` calls the
+  real ``create_order`` / ``cancel_order`` pmxt methods. Requires exchange
+  instances created via ``exchanges.create_authenticated_exchanges()``.
+* **Immediate market-order unwind on leg-2 failure.** If leg 2 fails (or is
+  rejected), we immediately unwind leg 1 with a market sell. Tests inject this
+  path via ``simulate_leg2_failure=True``.
+* **CLI-only trigger.** No HTTP execution endpoint and no scan-loop
+  auto-trigger — execution is always initiated interactively by an operator
+  via ``arbscanner execute <id> [--live]``.
+* **Hard $100 per-trade cap by default.** Raised via ``--max-trade-usd``.
+  Every plan re-checks the cap after sizing against available liquidity.
 
-The execution is persisted to a new ``execution_log`` SQLite table using
-the same ``CREATE TABLE IF NOT EXISTS`` bootstrap pattern as
-``paper_trading.py`` — no migrations system involvement.
+The execution is persisted to the ``execution_log`` SQLite table.
 """
 
 from __future__ import annotations
@@ -53,8 +50,8 @@ logger = logging.getLogger(__name__)
 #: but intentionally low while the pipeline is maturing.
 DEFAULT_MAX_TRADE_USD: float = 100.0
 
-#: Phase A ships dry-run only. This constant is imported by tests to assert
-#: no live code path exists.
+#: Default execution mode. Imported by legacy tests; new code should use the
+#: ``dry_run`` parameter on :func:`execute_plan` directly.
 EXECUTION_MODE: str = "dry_run"
 
 
@@ -133,8 +130,7 @@ class ExecutionPlan:
 
 @dataclass
 class ExecutionResult:
-    """The outcome of running an :class:`ExecutionPlan` through the dry-run
-    simulator."""
+    """The outcome of running an :class:`ExecutionPlan` through the pipeline."""
 
     plan: ExecutionPlan
     leg1: SimulatedOrder | None = None
@@ -152,6 +148,9 @@ class ExecutionResult:
     final_net_pnl: float = 0.0
 
     error_message: str = ""
+
+    #: False when real orders were placed via pmxt (Phase A.2).
+    dry_run: bool = True
 
     @property
     def timestamp(self) -> str:
@@ -473,44 +472,149 @@ def _simulate_place_order(
     )
 
 
+def _place_live_order(
+    *,
+    exchange,
+    exchange_name: str,
+    market_id: str,
+    outcome_id: str,
+    side: str,
+    order_type: str,
+    amount: float,
+    price: float,
+    fee_rate_fn,
+) -> SimulatedOrder:
+    """Place a real order via pmxt and wrap the response as a :class:`SimulatedOrder`.
+
+    The ``SimulatedOrder`` shape was deliberately designed to mirror pmxt's
+    ``Order`` model, so the rest of the pipeline is exchange-agnostic.
+    """
+    logger.info(
+        "[LIVE] Placing %s %s %s %.2f @ %.4f on %s (%s)",
+        order_type.upper(),
+        side.upper(),
+        market_id,
+        amount,
+        price,
+        exchange_name,
+        outcome_id,
+    )
+    order = exchange.create_order(
+        market_id=market_id,
+        outcome_id=outcome_id,
+        side=side,
+        type=order_type,
+        amount=amount,
+        price=price,
+    )
+    fee = order.fee if order.fee is not None else fee_rate_fn(price) * order.filled
+    return SimulatedOrder(
+        exchange=exchange_name,
+        market_id=market_id,
+        outcome_id=outcome_id,
+        side=side,
+        order_type=order_type,
+        amount=amount,
+        price=price,
+        status=order.status,
+        filled=float(order.filled),
+        remaining=float(order.remaining),
+        fee=float(fee),
+        dry_run=False,
+    )
+
+
+def _dispatch_order(
+    *,
+    dry_run: bool,
+    exchange,
+    exchange_name: str,
+    market_id: str,
+    outcome_id: str,
+    side: str,
+    order_type: str,
+    amount: float,
+    price: float,
+    fee_rate_fn,
+    force_rejection: bool = False,
+) -> SimulatedOrder:
+    """Route to simulation or live placement based on ``dry_run``."""
+    if dry_run:
+        return _simulate_place_order(
+            exchange=exchange_name,
+            market_id=market_id,
+            outcome_id=outcome_id,
+            side=side,
+            order_type=order_type,
+            amount=amount,
+            price=price,
+            fee_rate_fn=fee_rate_fn,
+            force_rejection=force_rejection,
+        )
+    return _place_live_order(
+        exchange=exchange,
+        exchange_name=exchange_name,
+        market_id=market_id,
+        outcome_id=outcome_id,
+        side=side,
+        order_type=order_type,
+        amount=amount,
+        price=price,
+        fee_rate_fn=fee_rate_fn,
+    )
+
+
 def execute_plan(
     plan: ExecutionPlan,
     *,
     poly_exchange=None,
     kalshi_exchange=None,
     simulate_leg2_failure: bool = False,
+    dry_run: bool = True,
 ) -> ExecutionResult:
-    """Run a plan through the dry-run simulator.
+    """Run an :class:`ExecutionPlan` through the placement pipeline.
 
-    Leg 1 always simulates a clean fill at the planned price. Leg 2 will
-    also simulate a clean fill unless ``simulate_leg2_failure`` is set, in
-    which case it returns a rejection and the unwind path fires.
+    When ``dry_run=True`` (default), every order is simulated — no real
+    ``create_order`` calls are made and no credentials are needed.
 
-    The unwind uses the *current best bid* on leg 1's order book (re-fetched
-    via the supplied exchange instance) as the market-order exit price. If
-    the exchange handle isn't supplied or the book is empty, unwind assumes
-    a worst-case exit at leg 1's entry price minus one cent of slippage.
+    When ``dry_run=False``, real orders are placed via the supplied
+    ``poly_exchange`` and ``kalshi_exchange`` instances (created via
+    :func:`exchanges.create_authenticated_exchanges`). Both must be provided.
+
+    The unwind uses the *current best bid* on leg 1's order book as the
+    market-order exit price. If the book is empty, it falls back to one cent
+    of slippage off the entry price.
     """
-    result = ExecutionResult(plan=plan)
+    result = ExecutionResult(plan=plan, dry_run=dry_run)
 
     if plan.status != "ready":
         result.result = plan.status
         result.error_message = plan.rejection_reason
         return result
 
-    # Sides derived from direction.
-    if plan.direction == "poly_yes_kalshi_no":
-        poly_side, kalshi_side = "buy", "buy"  # buying YES on poly, buying NO on kalshi
-    elif plan.direction == "poly_no_kalshi_yes":
-        poly_side, kalshi_side = "buy", "buy"  # buying NO on poly, buying YES on kalshi
+    if not dry_run and (poly_exchange is None or kalshi_exchange is None):
+        result.result = "error"
+        result.error_message = (
+            "Live execution requires authenticated exchange instances. "
+            "Pass exchanges from create_authenticated_exchanges()."
+        )
+        return result
+
+    # Sides derived from direction (both legs are buys — complementary outcomes sum to $1).
+    if plan.direction in ("poly_yes_kalshi_no", "poly_no_kalshi_yes"):
+        poly_side, kalshi_side = "buy", "buy"
     else:
         result.result = "rejected"
         result.error_message = f"Unknown direction {plan.direction!r}"
         return result
 
+    mode_tag = "DRY RUN" if dry_run else "LIVE"
+
     # --- Leg 1 (Polymarket) ---
-    leg1 = _simulate_place_order(
-        exchange="polymarket",
+    leg1 = _dispatch_order(
+        dry_run=dry_run,
+        exchange=poly_exchange,
+        exchange_name="polymarket",
         market_id=plan.poly_market_id,
         outcome_id=plan.poly_outcome_id,
         side=poly_side,
@@ -523,8 +627,10 @@ def execute_plan(
     result.leg1 = leg1
 
     # --- Leg 2 (Kalshi) ---
-    leg2 = _simulate_place_order(
-        exchange="kalshi",
+    leg2 = _dispatch_order(
+        dry_run=dry_run,
+        exchange=kalshi_exchange,
+        exchange_name="kalshi",
         market_id=plan.kalshi_market_id,
         outcome_id=plan.kalshi_outcome_id,
         side=kalshi_side,
@@ -537,36 +643,33 @@ def execute_plan(
     result.leg2 = leg2
 
     if leg2.status == "filled":
-        # Both legs filled — locked-in arb.
-        # For a correctly-matched pair, realized PnL at resolution equals
-        # the gross edge (per-contract 1 - cost) minus fees.
         gross = 1.0 - plan.per_contract_cost
         result.final_net_pnl = (gross - plan.per_contract_fees) * plan.size
         result.result = "success"
         return result
 
-    # --- Unwind path: leg 2 rejected, dump leg 1 at market on the bid. ---
+    # --- Unwind path: leg 2 failed — dump leg 1 at market on the bid. ---
     result.unwind_triggered = True
     unwind_exit_price = _determine_unwind_price(
         poly_exchange, plan.poly_outcome_id, plan.current_poly_price
     )
+    unwind_amount = leg1.filled if leg1.filled > 0 else plan.size
 
-    unwind = _simulate_place_order(
-        exchange="polymarket",
+    unwind = _dispatch_order(
+        dry_run=dry_run,
+        exchange=poly_exchange,
+        exchange_name="polymarket",
         market_id=plan.poly_market_id,
         outcome_id=plan.poly_outcome_id,
         side="sell",
         order_type="market",
-        amount=plan.size,
+        amount=unwind_amount,
         price=unwind_exit_price,
         fee_rate_fn=poly_fee,
         force_rejection=False,
     )
     result.unwind = unwind
 
-    # Realized PnL = leg 1 cost out + leg 1 fee out + unwind proceeds - unwind fee
-    # We bought at entry_price (leg1.price) paying fee, then sold at unwind_exit_price
-    # paying another fee. Per-contract: (unwind_exit_price - entry_price) - fee_buy - fee_sell.
     per_contract_loss = (
         (unwind.price - leg1.price)
         - (leg1.fee / plan.size if plan.size else 0.0)
@@ -575,8 +678,9 @@ def execute_plan(
     result.final_net_pnl = per_contract_loss * plan.size
     result.result = "partial_unwind"
     logger.warning(
-        "[DRY RUN] Partial fill → market-unwound leg 1. "
+        "[%s] Partial fill → market-unwound leg 1. "
         "Entry=%.4f Exit=%.4f Size=%.2f Realized=%.4f",
+        mode_tag,
         leg1.price,
         unwind.price,
         plan.size,
@@ -640,7 +744,7 @@ def log_execution(conn: sqlite3.Connection, result: ExecutionResult) -> int:
         (
             result.timestamp,
             plan.opportunity_id,
-            1,  # dry_run
+            1 if result.dry_run else 0,
             plan.direction,
             plan.poly_market_id,
             plan.kalshi_market_id,
@@ -688,7 +792,8 @@ def format_execution_report(result: ExecutionResult) -> str:
     """Human-readable multi-line report for the CLI."""
     plan = result.plan
     lines: list[str] = []
-    lines.append("Execution report (DRY RUN — no real orders placed)")
+    mode = "DRY RUN — no real orders placed" if result.dry_run else "LIVE EXECUTION — real orders placed"
+    lines.append(f"Execution report ({mode})")
     lines.append("=" * 60)
     lines.append(f"  Opportunity ID:       {plan.opportunity_id}")
     lines.append(f"  Market:               {plan.poly_title}")
