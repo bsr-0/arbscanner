@@ -252,7 +252,10 @@ def check_pmxtjs() -> CheckResult:
                     name="pmxtjs",
                     severity="warn",
                     message="pmxtjs is globally installed but binary is not on shell PATH",
-                    fix="Run `npm bin -g` and add that directory to PATH in ~/.zshrc",
+                    fix=(
+                        'Run: export PATH="$(npm config get prefix)/bin:$PATH"  '
+                        "then add that line to ~/.zshrc"
+                    ),
                 )
         except (subprocess.SubprocessError, OSError):
             pass
@@ -280,8 +283,8 @@ def check_pmxtjs() -> CheckResult:
                     "scanning will work; shell invocations of pmxtjs won't"
                 ),
                 fix=(
-                    "Run `npm config get prefix` and add <prefix>/bin to PATH "
-                    "in ~/.zshrc or ~/.bashrc"
+                    'Run: export PATH="$(npm config get prefix)/bin:$PATH"  '
+                    "then add that line to ~/.zshrc or ~/.bashrc"
                 ),
             )
     except Exception:
