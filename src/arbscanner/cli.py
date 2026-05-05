@@ -170,6 +170,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         get_historical_edge_stats,
         ingest_from_exchange,
         ingest_from_url,
+        ingest_kalshi_direct,
     )
 
     if args.ingest_url:
@@ -184,9 +185,10 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
 
     if args.ingest_live:
         console.print("[bold]Fetching resolved markets from both exchanges...[/bold]")
-        poly, kalshi = create_exchanges()
+        poly, _kalshi = create_exchanges()
         poly_count = ingest_from_exchange(poly, "Polymarket", limit=args.limit)
-        kalshi_count = ingest_from_exchange(kalshi, "Kalshi", limit=args.limit)
+        # Use direct Kalshi API instead of pmxt (pmxt ignores status field)
+        kalshi_count = ingest_kalshi_direct(limit=args.limit)
         console.print(
             f"[green]Ingested {poly_count} Polymarket + {kalshi_count} Kalshi resolved markets[/green]"
         )

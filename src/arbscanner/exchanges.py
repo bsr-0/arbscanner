@@ -33,9 +33,19 @@ def validate_credentials() -> list[str]:
 
 
 def create_exchanges() -> tuple[Any, Any]:
-    """Create Polymarket and Kalshi exchange instances (read-only, no auth)."""
+    """Create Polymarket and Kalshi exchange instances.
+
+    Kalshi requires authentication even for order book reads, so we pass
+    credentials when available. Polymarket public data works without auth.
+    """
     poly = pmxt.Polymarket()
-    kalshi = pmxt.Kalshi()
+    kalshi_key = os.getenv("KALSHI_API_KEY")
+    kalshi_pk = os.getenv("KALSHI_PRIVATE_KEY")
+    if kalshi_key and kalshi_pk:
+        kalshi = pmxt.Kalshi(api_key=kalshi_key, private_key=kalshi_pk)
+    else:
+        logger.warning("KALSHI_API_KEY/KALSHI_PRIVATE_KEY not set — order book fetches will fail")
+        kalshi = pmxt.Kalshi()
     return poly, kalshi
 
 

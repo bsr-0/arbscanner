@@ -42,6 +42,14 @@ DEFAULT_PROFILES: dict[tuple[str, str], float] = {
     ("crypto", "7-30"): 5.5,
     ("crypto", "30-90"): 7.5,
     ("crypto", "90+"): 10.0,
+    ("science_tech", "0-7"): 5.0,
+    ("science_tech", "7-30"): 7.0,
+    ("science_tech", "30-90"): 10.0,
+    ("science_tech", "90+"): 14.0,
+    ("weather", "0-7"): 6.0,
+    ("weather", "7-30"): 8.0,
+    ("weather", "30-90"): 10.0,
+    ("weather", "90+"): 12.0,
 }
 
 
@@ -77,33 +85,87 @@ def normalize_category(category: str | None) -> str:
     cat = category.lower().strip()
     # Map common category names to canonical forms
     mapping = {
+        # Politics
         "politics": "politics",
         "political": "politics",
         "election": "politics",
         "elections": "politics",
+        "world elections": "politics",
+        "global elections": "politics",
+        "mayoral": "politics",
+        "primary": "politics",
+        "primaries": "politics",
+        "congress": "politics",
+        "house of representatives": "politics",
+        "trump": "politics",
+        "geopolitics": "politics",
+        "approvals": "politics",
+        "world": "politics",
+        "iran": "politics",
+        "middle east": "politics",
+        "nuke": "politics",
+        "canada": "politics",
+        "uk": "politics",
+        # Economics
         "economics": "economics",
         "economy": "economics",
         "finance": "economics",
         "financial": "economics",
+        "financials": "economics",
         "fed": "economics",
         "macro": "economics",
+        "powell": "economics",
+        "economic policy": "economics",
+        # Sports
         "sports": "sports",
         "sport": "sports",
         "football": "sports",
         "basketball": "sports",
         "baseball": "sports",
         "soccer": "sports",
+        "tennis": "sports",
+        "epl": "sports",
+        "nfl": "sports",
+        "nba": "sports",
+        "mlb": "sports",
+        "nhl": "sports",
+        # Entertainment
         "entertainment": "entertainment",
         "pop culture": "entertainment",
         "culture": "entertainment",
         "celebrity": "entertainment",
+        "celebrities": "entertainment",
         "movies": "entertainment",
         "music": "entertainment",
         "tv": "entertainment",
+        "reality tv": "entertainment",
+        "netflix": "entertainment",
+        "top netflix": "entertainment",
+        "spotify": "entertainment",
+        "rotten tomatoes": "entertainment",
+        "awards": "entertainment",
+        "anime": "entertainment",
+        "games": "entertainment",
+        "cook": "entertainment",
+        "taylor swift": "entertainment",
+        # Crypto
         "crypto": "crypto",
         "cryptocurrency": "crypto",
         "bitcoin": "crypto",
         "ethereum": "crypto",
+        # Science & Tech
+        "science": "science_tech",
+        "tech": "science_tech",
+        "ai": "science_tech",
+        "openai": "science_tech",
+        "big tech": "science_tech",
+        "space": "science_tech",
+        "internet": "science_tech",
+        "satoshi": "crypto",
+        # Weather & Climate
+        "weather": "weather",
+        "climate": "weather",
+        "natural disasters": "weather",
     }
     for key, val in mapping.items():
         if key in cat:
@@ -311,8 +373,22 @@ def ingest_from_exchange(
         for market in result.data:
             if not (market.yes and market.no):
                 continue
-            # Only include markets that have resolved (status suggests closed)
-            if market.status not in ("closed", "resolved", "settled"):
+            # Check if market has resolved: either via status field or by
+            # detecting price snap to 0/1 with past resolution date.
+            # pmxt returns status=None for Kalshi, so we fall back to
+            # price-snap + date heuristic.
+            status_resolved = market.status in ("closed", "resolved", "settled")
+            past_resolution = (
+                market.resolution_date is not None
+                and market.resolution_date < pd.Timestamp.now(tz="UTC")
+            )
+            price_snapped = (
+                market.yes.price is not None
+                and market.no.price is not None
+                and market.yes.price in (0, 1, 0.0, 1.0)
+                and market.no.price in (0, 1, 0.0, 1.0)
+            )
+            if not (status_resolved or (price_snapped and past_resolution)):
                 continue
             # Determine which side won: resolved YES if yes.price is ~1.0
             resolved_yes = bool(market.yes.price and market.yes.price > 0.5)
@@ -344,8 +420,134 @@ def ingest_from_exchange(
         cursor = result.next_cursor
 
     df = pd.DataFrame(rows)
+
+    # Append to existing file rather than overwriting
+    if out_path.exists():
+        existing = pd.read_parquet(out_path)
+        if not existing.empty and "market_id" in existing.columns:
+            existing_ids = set(existing["market_id"].values)
+            df = df[~df["market_id"].isin(existing_ids)]
+            df = pd.concat([existing, df], ignore_index=True)
+            logger.info("Appended %d new markets (total: %d)", len(df) - len(existing), len(df))
+
     df.to_parquet(out_path)
     logger.info("Saved %d resolved markets to %s", len(df), out_path)
+    return len(df)
+
+
+KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+
+
+def ingest_kalshi_direct(
+    out_path: Path | None = None,
+    limit: int | None = None,
+) -> int:
+    """Ingest resolved Kalshi markets by hitting their API directly.
+
+    pmxt doesn't support Kalshi's status field or historical endpoints,
+    so we query both the live and historical API tiers and merge results.
+    """
+    out_path = out_path or (CALIBRATION_DATA_DIR / "historical_kalshi.parquet")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+
+    # Query both endpoints: historical (before cutoff) and live (after cutoff)
+    endpoints = [
+        f"{KALSHI_API_BASE}/historical/markets",
+        f"{KALSHI_API_BASE}/markets",
+    ]
+
+    for endpoint in endpoints:
+        cursor = None
+        endpoint_label = "historical" if "historical" in endpoint else "live"
+        params_base: dict[str, Any] = {"limit": 200}
+        if "historical" not in endpoint:
+            params_base["status"] = "settled"
+
+        consecutive_errors = 0
+        while True:
+            params = {**params_base}
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                resp = httpx.get(endpoint, params=params, timeout=30)
+                if resp.status_code == 429:
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        logger.warning("Too many 429s from Kalshi %s, stopping", endpoint_label)
+                        break
+                    import time
+                    wait = min(2 ** consecutive_errors, 60)
+                    logger.info("Rate limited by Kalshi, waiting %ds", wait)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                consecutive_errors = 0
+            except httpx.HTTPStatusError:
+                logger.exception("Error fetching from Kalshi %s endpoint", endpoint_label)
+                break
+            except Exception:
+                logger.exception("Error fetching from Kalshi %s endpoint", endpoint_label)
+                break
+
+            data = resp.json()
+            markets = data.get("markets", [])
+
+            for m in markets:
+                ticker = m.get("ticker", "")
+                # Skip multi-leg parlay markets
+                if "MVE" in ticker:
+                    continue
+                result = m.get("result")
+                if result not in ("yes", "no"):
+                    continue
+                # Kalshi API uses dollar-denominated fields (0.00-1.00 strings)
+                last_price_str = m.get("last_price_dollars") or m.get("last_price")
+                try:
+                    final_price = float(last_price_str) if last_price_str is not None else None
+                except (ValueError, TypeError):
+                    final_price = None
+                rows.append({
+                    "market_id": ticker,
+                    "category": normalize_category(m.get("event_ticker", "")),
+                    "created_date": pd.to_datetime(m.get("open_time"), utc=True, errors="coerce"),
+                    "resolution_date": pd.to_datetime(m.get("close_time"), utc=True, errors="coerce"),
+                    "final_price": final_price,
+                    "resolved_yes": result == "yes",
+                    "title": m.get("title", ""),
+                    "exchange": "kalshi",
+                })
+
+            logger.info(
+                "Fetched %d markets from Kalshi %s (collected: %d)",
+                len(markets), endpoint_label, len(rows),
+            )
+
+            cursor = data.get("cursor")
+            if not cursor or len(markets) == 0:
+                break
+            if limit and len(rows) >= limit:
+                break
+
+        if limit and len(rows) >= limit:
+            rows = rows[:limit]
+            break
+
+    df = pd.DataFrame(rows)
+
+    # Append to existing file rather than overwriting
+    if out_path.exists():
+        existing = pd.read_parquet(out_path)
+        if not existing.empty and "market_id" in existing.columns:
+            existing_ids = set(existing["market_id"].values)
+            new_only = df[~df["market_id"].isin(existing_ids)]
+            logger.info("Appending %d new Kalshi markets to %d existing", len(new_only), len(existing))
+            df = pd.concat([existing, new_only], ignore_index=True)
+
+    df.to_parquet(out_path)
+    logger.info("Saved %d resolved Kalshi markets to %s", len(df), out_path)
     return len(df)
 
 
