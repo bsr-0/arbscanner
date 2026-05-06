@@ -1,0 +1,57 @@
+name: Update GitHub Pages Dashboard
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # Once daily at noon UTC
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install pmxtjs sidecar
+        run: npm install -g pmxtjs
+
+      - name: Run scanner and export data
+        env:
+          KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uv run python -m arbscanner.export --hours 24 --output docs/data.json
+
+      - name: Commit and push data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update dashboard data [skip ci]"
+            git push
+          fi
