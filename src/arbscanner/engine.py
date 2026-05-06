@@ -156,10 +156,10 @@ def calculate_arb(
 
 def _best_ask(order_book) -> dict | None:
     """Extract the best (lowest) ask from an order book."""
-    if not order_book.asks:
+    if order_book is None or not getattr(order_book, "asks", None):
         return None
     best = order_book.asks[0]
-    return {"price": best.price, "amount": best.amount}
+    return {"price": best.price, "amount": best.size}
 
 
 def _fetch_all_books(

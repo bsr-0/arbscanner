@@ -24,6 +24,29 @@ class CredentialError(RuntimeError):
     """Raised when required exchange credentials are missing."""
 
 
+def _normalize_pem_key(raw: str) -> str:
+    """Re-format a PEM private key that lost its newlines (e.g. from .env).
+
+    Handles literal ``\\n``, space-separated base64 blocks, or already-correct keys.
+    """
+    raw = raw.replace("\\n", "\n")
+    if "\n" in raw.strip().removeprefix("-----").removesuffix("-----"):
+        return raw  # already has real newlines
+    # Space-separated: extract header/footer markers and rejoin base64
+    parts = raw.split()
+    # Find header end (e.g. "-----BEGIN RSA PRIVATE KEY-----") and footer start
+    header_end = next(i for i, p in enumerate(parts) if p.endswith("-----")) + 1
+    footer_start = len(parts) - 1 - next(
+        i for i, p in enumerate(reversed(parts)) if p.startswith("-----")
+    )
+    header = " ".join(parts[:header_end])
+    footer = " ".join(parts[footer_start:])
+    body = "".join(parts[header_end:footer_start])
+    # PEM base64 lines are 64 chars wide
+    body_lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+    return header + "\n" + "\n".join(body_lines) + "\n" + footer
+
+
 def validate_credentials() -> list[str]:
     """Return a list of missing env var names required for live trading.
 
@@ -41,6 +64,8 @@ def create_exchanges() -> tuple[Any, Any]:
     poly = pmxt.Polymarket()
     kalshi_key = os.getenv("KALSHI_API_KEY")
     kalshi_pk = os.getenv("KALSHI_PRIVATE_KEY")
+    if kalshi_pk:
+        kalshi_pk = _normalize_pem_key(kalshi_pk)
     if kalshi_key and kalshi_pk:
         kalshi = pmxt.Kalshi(api_key=kalshi_key, private_key=kalshi_pk)
     else:
@@ -70,9 +95,12 @@ def create_authenticated_exchanges() -> tuple[Any, Any]:
         passphrase=os.getenv("POLY_PASSPHRASE"),
         private_key=os.getenv("POLY_PRIVATE_KEY"),
     )
+    kalshi_pk = os.getenv("KALSHI_PRIVATE_KEY")
+    if kalshi_pk:
+        kalshi_pk = _normalize_pem_key(kalshi_pk)
     kalshi = pmxt.Kalshi(
         api_key=os.getenv("KALSHI_API_KEY"),
-        private_key=os.getenv("KALSHI_PRIVATE_KEY"),
+        private_key=kalshi_pk,
     )
     return poly, kalshi
 

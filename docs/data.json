@@ -1,11 +1,36 @@
 {
-  "generated_at": "2026-05-06T02:39:41.699558+00:00",
+  "generated_at": "2026-05-06T03:41:48.317540+00:00",
   "matched_pairs": 8135,
   "stats": {
-    "total_opportunities": 0,
-    "avg_net_edge": 0,
-    "max_net_edge": 0,
-    "total_expected_profit": 0
+    "total_opportunities": 2,
+    "avg_net_edge": 0.014645,
+    "max_net_edge": 0.0248,
+    "total_expected_profit": 0.3344
   },
-  "opportunities": []
+  "opportunities": [
+    {
+      "id": 1,
+      "timestamp": "2026-05-06T03:41:41.646780+00:00",
+      "market_title": "Blue wave in 2026? - Blue wave in 2026?",
+      "direction": "poly_no_kalshi_yes",
+      "gross_edge": 0.06000000000000005,
+      "net_edge": 0.02480000000000005,
+      "available_size": 7.69,
+      "expected_profit": 0.1907120000000004,
+      "poly_price": 0.2,
+      "kalshi_price": 0.74
+    },
+    {
+      "id": 2,
+      "timestamp": "2026-05-06T03:41:41.725402+00:00",
+      "market_title": "Blue tsunami in 2026? - Blue tsunami in 2026?",
+      "direction": "poly_no_kalshi_yes",
+      "gross_edge": 0.040000000000000036,
+      "net_edge": 0.004490000000000036,
+      "available_size": 32.0,
+      "expected_profit": 0.14368000000000114,
+      "poly_price": 0.51,
+      "kalshi_price": 0.45
+    }
+  ]
 }
