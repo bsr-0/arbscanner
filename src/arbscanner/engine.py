@@ -267,6 +267,32 @@ def scan_all_pairs(
         except Exception:
             logger.debug("Odds API enrichment unavailable", exc_info=True)
 
+        # Phase 1.5b: crypto fair values via CoinGecko + Black-Scholes
+        try:
+            from arbscanner.crypto import get_crypto_client
+
+            crypto_client = get_crypto_client()
+            for pair in pairs:
+                if pair.category and pair.category.lower() in (
+                    "crypto", "bitcoin", "ethereum",
+                ):
+                    key = f"{pair.poly_market_id}::{pair.kalshi_market_id}"
+                    if key not in fair_values:
+                        fv = crypto_client.get_fair_value(pair)
+                        if fv is not None:
+                            fair_values[key] = fv
+            crypto_count = sum(
+                1 for k, v in fair_values.items()
+                if hasattr(v, "asset")  # CryptoFairValue has .asset
+            )
+            if crypto_count:
+                logger.info(
+                    "Enriched %d pairs with crypto fair values",
+                    crypto_count,
+                )
+        except Exception:
+            logger.debug("Crypto fair value enrichment unavailable", exc_info=True)
+
         # Phase 2: compute arbs locally (fast, no I/O)
         all_opps: list[ArbOpportunity] = []
         for pair in pairs:
