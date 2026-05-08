@@ -399,31 +399,49 @@ class TestOddsClientNoKey:
 
 
 class TestOddsClientGetFairValue:
-    def test_non_sports_prefix_returns_none(self):
-        client = OddsClient.__new__(OddsClient)
-        client._api_key = "test"
-        client._cache = OddsCache(ttl_seconds=60)
-        client._limiter = MagicMock()
+    def _make_client(self):
+        client = OddsClient("test_key", cache_ttl=60, provider="the-odds-api")
         client._available_sports = set()
-        client._requests_remaining = None
-        client._budget_exhausted = False
-        client._matcher = EventMatcher()
+        return client
 
+    def test_non_sports_prefix_returns_none(self):
+        client = self._make_client()
         pair = MockMatchedPair(kalshi_market_id="KXFEDCUT-26JUN")
         assert client.get_fair_value(pair) is None
 
-    def test_budget_exhausted_returns_empty(self):
-        client = OddsClient.__new__(OddsClient)
-        client._api_key = "test"
-        client._cache = OddsCache(ttl_seconds=60)
-        client._limiter = MagicMock()
+    def test_all_backends_failed_returns_none(self):
+        client = self._make_client()
         client._available_sports = {"basketball_cba"}
-        client._requests_remaining = 0
-        client._budget_exhausted = True
-        client._matcher = EventMatcher()
+        for b in client._backends:
+            b._failed = True
 
         pair = MockMatchedPair(
             kalshi_market_id="KXCBAGAME-26APR",
             kalshi_title="Home vs Away",
         )
         assert client.get_fair_value(pair) is None
+
+
+class TestMultiBackend:
+    def test_provider_selection(self):
+        client = OddsClient("key", provider="oddspapi")
+        assert client.provider_name == "oddspapi"
+
+    def test_default_provider(self):
+        client = OddsClient("key", provider="the-odds-api")
+        assert client.provider_name == "the-odds-api"
+
+    def test_fallback_order(self):
+        client = OddsClient("key", provider="the-odds-api")
+        names = [b.name for b in client._backends]
+        assert names[0] == "the-odds-api"
+        assert len(names) == 3  # all three backends
+
+    def test_backends_have_correct_types(self):
+        from arbscanner.odds import TheOddsApiBackend, OddsApiIoBackend, OddsPapiBackend
+        client = OddsClient("key", provider="the-odds-api")
+        assert isinstance(client._backends[0], TheOddsApiBackend)
+
+    def test_provider_name_reflects_active(self):
+        client = OddsClient("key", provider="odds-api-io")
+        assert client.provider_name == "odds-api-io"

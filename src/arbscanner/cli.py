@@ -603,9 +603,10 @@ def cmd_odds(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     client = OddsClient(api_key, cache_ttl=settings.odds_cache_ttl)
+    console.print(f"[dim]Provider: {client.provider_name}[/dim]")
 
     if args.list_sports:
-        console.print("[bold]Available sports from The Odds API:[/bold]")
+        console.print("[bold]Available sports:[/bold]")
         sports = client.fetch_available_sports()
         if not sports:
             console.print("[dim]  No sports returned (check API key)[/dim]")
@@ -642,8 +643,9 @@ def cmd_odds(args: argparse.Namespace) -> None:
     console.print(
         f"\n[bold]Matched {matched}/{min(len(sports_pairs), args.limit)} sports pairs[/bold]"
     )
-    if client._requests_remaining is not None:
-        console.print(f"[dim]API requests remaining: {client._requests_remaining}[/dim]")
+    console.print(f"[dim]Active provider: {client.provider_name}[/dim]")
+    if client.requests_remaining is not None:
+        console.print(f"[dim]API requests remaining: {client.requests_remaining}[/dim]")
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:

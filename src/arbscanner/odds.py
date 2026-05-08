@@ -1,17 +1,25 @@
-"""Sportsbook fair value via The Odds API.
+"""Sportsbook fair value via multiple odds API backends.
 
 Fetches consensus odds from multiple bookmakers for sports events and
-matches them to arbscanner's MatchedPair objects. The fair value is
-nested inside the existing calibration dict so the dashboard and API
-get it without schema changes.
+matches them to arbscanner's MatchedPair objects. Supports three
+backends with automatic fallback:
 
-Fully optional — if ODDS_API_KEY is unset, ``get_odds_client()``
-returns None and the rest of the system proceeds unchanged.
+1. **Odds-API.io** (default) — 100 req/hr free, 265+ bookmakers
+2. **The Odds API** — 500 req/month free, 40+ bookmakers
+3. **OddsPapi** — no stated cap, 350+ bookmakers
+
+Set ``ODDS_PROVIDER`` env var to choose: ``odds-api-io`` (default),
+``the-odds-api``, or ``oddspapi``. Falls back through the list if the
+primary fails.
+
+Fully optional — if no API key is set, ``get_odds_client()`` returns
+None and the rest of the system proceeds unchanged.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 import statistics
 import threading
@@ -28,7 +36,7 @@ from arbscanner.utils import RateLimiter, retry_with_backoff
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Kalshi market-ID prefix -> The Odds API sport_key
+# Kalshi market-ID prefix -> sport_key (shared across all backends)
 # ---------------------------------------------------------------------------
 
 KALSHI_PREFIX_TO_SPORT: dict[str, str] = {
@@ -67,7 +75,7 @@ KALSHI_PREFIX_TO_SPORT: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Odds math
+# Odds math (shared across all backends)
 # ---------------------------------------------------------------------------
 
 
@@ -108,8 +116,11 @@ def consensus_implied_prob(
 ) -> tuple[float, int, float, float] | None:
     """Compute consensus fair probability for a team from bookmaker data.
 
+    Expects the normalized format (see ``_normalize_event``).
+
     Args:
-        bookmakers: List of bookmaker dicts from The Odds API response.
+        bookmakers: List of bookmaker dicts with ``markets`` containing
+            ``h2h`` outcomes with ``price`` (decimal odds).
         team_index: 0 for home team, 1 for away team.
 
     Returns:
@@ -124,13 +135,11 @@ def consensus_implied_prob(
             outcomes = market.get("outcomes", [])
             if len(outcomes) < 2:
                 continue
-            # Convert all outcomes to implied prob, then remove vig
             raw = [decimal_to_implied_prob(o.get("price", 0)) for o in outcomes]
             fair = remove_vig(raw)
             if team_index < len(fair):
                 fair_probs.append(fair[team_index])
-            break  # only one h2h market per bookmaker
-
+            break
     if not fair_probs:
         return None
 
@@ -151,11 +160,11 @@ def consensus_implied_prob(
 class FairValue:
     """Sportsbook consensus fair value for a matched sports pair."""
 
-    implied_prob: float  # consensus probability for the "yes" side (0.0-1.0)
+    implied_prob: float
     num_bookmakers: int
     min_prob: float
     max_prob: float
-    spread: float  # max - min (bookmaker disagreement)
+    spread: float
     home_team: str
     away_team: str
     sport_key: str
@@ -172,32 +181,25 @@ class FairValue:
 
 
 # ---------------------------------------------------------------------------
-# Event matching
+# Event matching (shared across all backends)
 # ---------------------------------------------------------------------------
 
-# Words to strip when comparing team names
 _TEAM_SUFFIXES = frozenset({
     "fc", "sc", "bc", "ac", "cf", "fk", "sk", "afc", "bk",
     "city", "united", "athletic", "sporting", "club",
 })
 
 _VS_PATTERN = re.compile(r"\s+vs\.?\s+", re.IGNORECASE)
-# Polymarket often duplicates the title: "Team A vs Team B - Team A vs Team B"
 _DASH_DUPLICATE = re.compile(r"\s*-\s*.+$")
 
 
 class EventMatcher:
-    """Match MatchedPair team names to Odds API events."""
+    """Match MatchedPair team names to odds API events."""
 
     @staticmethod
     def extract_teams(pair: MatchedPair) -> tuple[str, str] | None:
-        """Parse two team names from the pair's titles.
-
-        Tries kalshi_title first (shorter/cleaner), falls back to poly_title.
-        Returns (team_a, team_b) or None if unparseable.
-        """
+        """Parse two team names from the pair's titles."""
         for title in (pair.kalshi_title, pair.poly_title):
-            # Strip trailing duplicate after " - "
             cleaned = _DASH_DUPLICATE.sub("", title).strip()
             parts = _VS_PATTERN.split(cleaned, maxsplit=1)
             if len(parts) == 2:
@@ -208,7 +210,6 @@ class EventMatcher:
 
     @staticmethod
     def _tokenize(name: str) -> set[str]:
-        """Lowercase, split, strip suffixes."""
         tokens = set(name.lower().split())
         return tokens - _TEAM_SUFFIXES
 
@@ -218,11 +219,7 @@ class EventMatcher:
         event_home: str,
         event_away: str,
     ) -> float:
-        """Jaccard similarity between pair teams and event teams.
-
-        Tries both orderings (pair teams might be swapped vs. event).
-        Returns best score 0.0-1.0.
-        """
+        """Jaccard similarity between pair teams and event teams."""
         pa_tok = EventMatcher._tokenize(pair_teams[0])
         pb_tok = EventMatcher._tokenize(pair_teams[1])
         eh_tok = EventMatcher._tokenize(event_home)
@@ -235,7 +232,6 @@ class EventMatcher:
             union = len(a | b)
             return inter / union if union else 0.0
 
-        # Try both orderings
         score_1 = (jaccard(pa_tok, eh_tok) + jaccard(pb_tok, ea_tok)) / 2
         score_2 = (jaccard(pa_tok, ea_tok) + jaccard(pb_tok, eh_tok)) / 2
         return max(score_1, score_2)
@@ -248,21 +244,12 @@ class EventMatcher:
     ) -> tuple[dict, int] | None:
         """Find best matching event for a pair.
 
-        Args:
-            pair: The matched market pair.
-            events: Odds API events for the relevant sport.
-            match_threshold: Minimum Jaccard score to accept.
-
-        Returns:
-            (event_dict, team_index) where team_index is 0 (home) or 1 (away)
-            for whichever team corresponds to the "YES" side of the pair.
-            None if no match found.
+        Returns (event_dict, team_index) or None.
         """
         teams = EventMatcher.extract_teams(pair)
         if teams is None:
             return None
 
-        # Filter by date if resolution_date is available
         filtered = events
         if pair.resolution_date:
             try:
@@ -289,8 +276,6 @@ class EventMatcher:
         if best_event is None or best_score < match_threshold:
             return None
 
-        # Determine which team is the "first" team in the pair title
-        # (the YES side for Polymarket-style "Team A vs Team B" markets).
         home = best_event.get("home_team", "")
         away = best_event.get("away_team", "")
         pa_tok = EventMatcher._tokenize(teams[0])
@@ -302,20 +287,14 @@ class EventMatcher:
             union = len(a | b)
             return inter / union if union else 0.0
 
-        # team_index 0 = home, 1 = away
-        if jaccard(pa_tok, eh_tok) >= jaccard(pa_tok, ea_tok):
-            team_index = 0
-        else:
-            team_index = 1
-
+        team_index = 0 if jaccard(pa_tok, eh_tok) >= jaccard(pa_tok, ea_tok) else 1
         return (best_event, team_index)
 
 
 def _event_within_window(event: dict, target: datetime, hours: int = 48) -> bool:
-    """Check if an event's commence_time is within +/- hours of target."""
     commence = event.get("commence_time", "")
     if not commence:
-        return True  # no date info, include it
+        return True
     try:
         event_dt = datetime.fromisoformat(commence.replace("Z", "+00:00"))
         delta = abs((event_dt - target).total_seconds())
@@ -325,12 +304,12 @@ def _event_within_window(event: dict, target: datetime, hours: int = 48) -> bool
 
 
 # ---------------------------------------------------------------------------
-# Cache
+# Cache (shared)
 # ---------------------------------------------------------------------------
 
 
 class OddsCache:
-    """Thread-safe TTL cache for Odds API responses, keyed by sport."""
+    """Thread-safe TTL cache for odds API responses, keyed by sport."""
 
     def __init__(self, ttl_seconds: int = 300):
         self._ttl = ttl_seconds
@@ -361,125 +340,300 @@ class OddsCache:
 
 
 # ---------------------------------------------------------------------------
-# Client
+# Backend abstraction
 # ---------------------------------------------------------------------------
-
-_BASE_URL = "https://api.the-odds-api.com/v4"
 
 
 def _extract_sport_prefix(kalshi_market_id: str) -> str | None:
-    """Extract the sport prefix from a Kalshi market ID.
-
-    "KXCBAGAME-26APR130735SHAXBRF-BRF" -> "KXCBAGAME"
-    """
+    """Extract the sport prefix from a Kalshi market ID."""
     parts = kalshi_market_id.split("-", 1)
     if parts:
         return parts[0]
     return None
 
 
-class OddsClient:
-    """Client for The Odds API with caching and budget tracking."""
+class OddsBackend:
+    """Abstract interface for an odds data provider."""
 
-    def __init__(self, api_key: str, cache_ttl: int = 300):
+    name: str = "base"
+
+    def __init__(self, api_key: str, rate_limit: float = 1.0):
         self._api_key = api_key
-        self._cache = OddsCache(ttl_seconds=cache_ttl)
-        self._limiter = RateLimiter(calls_per_sec=1.0)
-        self._available_sports: set[str] | None = None
-        self._requests_remaining: int | None = None
-        self._budget_exhausted = False
-        self._matcher = EventMatcher()
+        self._limiter = RateLimiter(calls_per_sec=rate_limit)
+        self._failed = False
 
     @retry_with_backoff(max_attempts=2, base_delay=1.0)
-    def _get(self, path: str, params: dict | None = None) -> httpx.Response:
-        """Make a GET request to The Odds API."""
+    def _get(self, url: str, params: dict | None = None) -> httpx.Response:
         self._limiter.acquire()
-        url = f"{_BASE_URL}{path}"
+        resp = httpx.get(url, params=params or {}, timeout=15)
+        resp.raise_for_status()
+        return resp
+
+    def fetch_sports(self) -> list[str]:
+        """Return available sport keys."""
+        raise NotImplementedError
+
+    def fetch_odds(self, sport_key: str) -> list[dict]:
+        """Return normalized event list for a sport.
+
+        Each event must have: home_team, away_team, commence_time,
+        bookmakers[].markets[].key="h2h", outcomes[].price (decimal).
+        """
+        raise NotImplementedError
+
+
+class TheOddsApiBackend(OddsBackend):
+    """The Odds API (the-odds-api.com) — 500 req/month free."""
+
+    name = "the-odds-api"
+    _base = "https://api.the-odds-api.com/v4"
+
+    def __init__(self, api_key: str):
+        super().__init__(api_key, rate_limit=1.0)
+        self.requests_remaining: int | None = None
+
+    @retry_with_backoff(max_attempts=2, base_delay=1.0)
+    def _get(self, url: str, params: dict | None = None) -> httpx.Response:
+        self._limiter.acquire()
         all_params = {"apiKey": self._api_key}
         if params:
             all_params.update(params)
         resp = httpx.get(url, params=all_params, timeout=15)
         resp.raise_for_status()
-        # Track API budget from response headers
         remaining = resp.headers.get("x-requests-remaining")
         if remaining is not None:
-            self._requests_remaining = int(remaining)
-            if self._requests_remaining < 20:
-                logger.warning(
-                    "Odds API budget low: %d requests remaining",
-                    self._requests_remaining,
-                )
-                if self._requests_remaining < 5:
-                    self._budget_exhausted = True
+            self.requests_remaining = int(remaining)
+            if self.requests_remaining < 5:
+                self._failed = True
+                logger.warning("The Odds API budget exhausted (%d remaining)", self.requests_remaining)
         return resp
 
-    def fetch_available_sports(self) -> list[str]:
-        """Fetch list of available sport keys. Cached for session lifetime."""
-        if self._available_sports is not None:
-            return sorted(self._available_sports)
+    def fetch_sports(self) -> list[str]:
         try:
-            resp = self._get("/sports")
-            sports = [s["key"] for s in resp.json() if s.get("active", True)]
-            self._available_sports = set(sports)
-            return sorted(self._available_sports)
+            resp = self._get(f"{self._base}/sports")
+            return [s["key"] for s in resp.json() if s.get("active", True)]
         except Exception:
-            logger.debug("Failed to fetch available sports from Odds API")
-            self._available_sports = set()
+            logger.debug("the-odds-api: failed to fetch sports")
             return []
 
     def fetch_odds(self, sport_key: str) -> list[dict]:
-        """Fetch odds for a sport. Returns cached data if available."""
-        cached = self._cache.get(sport_key)
-        if cached is not None:
-            return cached
-
-        if self._budget_exhausted:
-            logger.debug("Odds API budget exhausted, skipping fetch for %s", sport_key)
+        if self._failed:
             return []
-
-        # Check if sport is available
-        if self._available_sports is not None and sport_key not in self._available_sports:
-            return []
-
         try:
             resp = self._get(
-                f"/sports/{sport_key}/odds",
+                f"{self._base}/sports/{sport_key}/odds",
+                params={"regions": "us,eu,uk", "markets": "h2h", "oddsFormat": "decimal"},
+            )
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 429):
+                self._failed = True
+            return []
+        except Exception:
+            return []
+
+
+class OddsApiIoBackend(OddsBackend):
+    """Odds-API.io — 100 req/hr free, 265+ bookmakers."""
+
+    name = "odds-api-io"
+    _base = "https://api.odds-api.io/v1"
+
+    def __init__(self, api_key: str):
+        # 100 req/hr = ~1.7 req/min; stay safe at 1/sec
+        super().__init__(api_key, rate_limit=1.0)
+
+    def fetch_sports(self) -> list[str]:
+        try:
+            resp = self._get(
+                f"{self._base}/sports",
+                params={"apiKey": self._api_key},
+            )
+            data = resp.json()
+            if isinstance(data, list):
+                return [s.get("key", s.get("id", "")) for s in data if s.get("active", True)]
+            return []
+        except Exception:
+            logger.debug("odds-api-io: failed to fetch sports")
+            return []
+
+    def fetch_odds(self, sport_key: str) -> list[dict]:
+        if self._failed:
+            return []
+        try:
+            resp = self._get(
+                f"{self._base}/sports/{sport_key}/odds",
                 params={
+                    "apiKey": self._api_key,
                     "regions": "us,eu,uk",
                     "markets": "h2h",
                     "oddsFormat": "decimal",
                 },
             )
-            events = resp.json()
-            self._cache.put(sport_key, events)
-            logger.info(
-                "Fetched %d events for %s (remaining: %s)",
-                len(events),
-                sport_key,
-                self._requests_remaining,
-            )
-            return events
+            data = resp.json()
+            # Odds-API.io uses the same response format as The Odds API
+            if isinstance(data, list):
+                return data
+            # If the response is wrapped in a data key
+            if isinstance(data, dict) and "data" in data:
+                return data["data"]
+            return []
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401:
-                logger.error("Odds API key is invalid (401)")
-                self._budget_exhausted = True
-            elif exc.response.status_code == 429:
-                logger.warning("Odds API rate limited (429)")
-                self._budget_exhausted = True
-            else:
-                logger.debug("Odds API error for %s: %s", sport_key, exc)
+            if exc.response.status_code in (401, 403, 429):
+                self._failed = True
+                logger.warning("odds-api-io: %d error, disabling", exc.response.status_code)
             return []
         except Exception:
-            logger.debug("Failed to fetch odds for %s", sport_key, exc_info=True)
             return []
 
-    def get_fair_value(self, pair: MatchedPair) -> FairValue | None:
-        """Get sportsbook fair value for a matched sports pair.
 
-        Returns None if: not a sports pair, sport not covered,
-        event not matched, or API unavailable.
-        """
-        # Map Kalshi prefix to sport key
+class OddsPapiBackend(OddsBackend):
+    """OddsPapi (oddspapi.io) — 350+ bookmakers, free."""
+
+    name = "oddspapi"
+    _base = "https://api.oddspapi.io/v1"
+
+    def __init__(self, api_key: str):
+        super().__init__(api_key, rate_limit=0.5)
+
+    def fetch_sports(self) -> list[str]:
+        try:
+            resp = self._get(
+                f"{self._base}/sports",
+                params={"apiKey": self._api_key},
+            )
+            data = resp.json()
+            if isinstance(data, list):
+                return [s.get("key", s.get("id", "")) for s in data if s.get("active", True)]
+            return []
+        except Exception:
+            logger.debug("oddspapi: failed to fetch sports")
+            return []
+
+    def fetch_odds(self, sport_key: str) -> list[dict]:
+        if self._failed:
+            return []
+        try:
+            resp = self._get(
+                f"{self._base}/sports/{sport_key}/odds",
+                params={
+                    "apiKey": self._api_key,
+                    "regions": "us,eu,uk",
+                    "markets": "h2h",
+                    "oddsFormat": "decimal",
+                },
+            )
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict) and "data" in data:
+                return data["data"]
+            return []
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403, 429):
+                self._failed = True
+            return []
+        except Exception:
+            return []
+
+
+# Provider registry
+PROVIDERS: dict[str, type[OddsBackend]] = {
+    "odds-api-io": OddsApiIoBackend,
+    "the-odds-api": TheOddsApiBackend,
+    "oddspapi": OddsPapiBackend,
+}
+
+# Fallback order when the primary backend fails
+FALLBACK_ORDER = ["odds-api-io", "the-odds-api", "oddspapi"]
+
+
+def _resolve_provider() -> str:
+    """Determine the configured provider from env."""
+    return os.getenv("ODDS_PROVIDER", "the-odds-api").lower().strip()
+
+
+# ---------------------------------------------------------------------------
+# Client (uses backends with fallback)
+# ---------------------------------------------------------------------------
+
+
+class OddsClient:
+    """Multi-backend odds client with caching and automatic fallback."""
+
+    def __init__(self, api_key: str, cache_ttl: int = 300, provider: str | None = None):
+        self._api_key = api_key
+        self._cache = OddsCache(ttl_seconds=cache_ttl)
+        self._matcher = EventMatcher()
+        self._available_sports: set[str] | None = None
+
+        # Build backend chain: preferred first, then fallbacks
+        preferred = provider or _resolve_provider()
+        self._backends: list[OddsBackend] = []
+        # Add preferred backend first
+        if preferred in PROVIDERS:
+            self._backends.append(PROVIDERS[preferred](api_key))
+        # Add remaining as fallbacks
+        for name in FALLBACK_ORDER:
+            if name != preferred and name in PROVIDERS:
+                self._backends.append(PROVIDERS[name](api_key))
+
+        self._active_backend: OddsBackend | None = self._backends[0] if self._backends else None
+        self.requests_remaining: int | None = None
+
+    @property
+    def provider_name(self) -> str:
+        if self._active_backend:
+            return self._active_backend.name
+        return "none"
+
+    def fetch_available_sports(self) -> list[str]:
+        """Fetch available sports, trying backends in order."""
+        if self._available_sports is not None:
+            return sorted(self._available_sports)
+
+        for backend in self._backends:
+            if backend._failed:
+                continue
+            sports = backend.fetch_sports()
+            if sports:
+                self._available_sports = set(sports)
+                self._active_backend = backend
+                logger.info("Using %s for odds (found %d sports)", backend.name, len(sports))
+                return sorted(self._available_sports)
+
+        self._available_sports = set()
+        return []
+
+    def fetch_odds(self, sport_key: str) -> list[dict]:
+        """Fetch odds, using cache and falling through backends on failure."""
+        cached = self._cache.get(sport_key)
+        if cached is not None:
+            return cached
+
+        if self._available_sports is not None and sport_key not in self._available_sports:
+            return []
+
+        for backend in self._backends:
+            if backend._failed:
+                continue
+            events = backend.fetch_odds(sport_key)
+            if events:
+                self._cache.put(sport_key, events)
+                self._active_backend = backend
+                # Track remaining requests for The Odds API
+                if isinstance(backend, TheOddsApiBackend):
+                    self.requests_remaining = backend.requests_remaining
+                logger.info(
+                    "Fetched %d events for %s via %s",
+                    len(events), sport_key, backend.name,
+                )
+                return events
+
+        return []
+
+    def get_fair_value(self, pair: MatchedPair) -> FairValue | None:
+        """Get sportsbook fair value for a matched sports pair."""
         prefix = _extract_sport_prefix(pair.kalshi_market_id)
         if prefix is None:
             return None
