@@ -233,7 +233,7 @@ def _best_ask(order_book) -> dict | None:
     if order_book is None or not getattr(order_book, "asks", None):
         return None
     best = order_book.asks[0]
-    return {"price": best.price, "amount": best.amount}
+    return {"price": best.price, "amount": best.size}
 
 
 def _best_bid(order_book) -> dict | None:
@@ -241,7 +241,7 @@ def _best_bid(order_book) -> dict | None:
     if order_book is None or not getattr(order_book, "bids", None):
         return None
     best = order_book.bids[0]
-    return {"price": best.price, "amount": best.amount}
+    return {"price": best.price, "amount": best.size}
 
 
 def _outcome_ids_for_direction(

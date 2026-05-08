@@ -7,10 +7,31 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0d1117; color: #c9d1d9; }
-        .header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; justify-content: space-between; align-items: center; }
-        .header h1 { font-size: 20px; color: #58a6ff; }
-        .stats { display: flex; gap: 24px; font-size: 13px; color: #8b949e; }
-        .stats .value { color: #c9d1d9; font-weight: 600; }
+
+        nav.top-nav { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-bottom: 1px solid #21262d; }
+        nav.top-nav .brand { font-size: 16px; font-weight: 700; color: #58a6ff; text-decoration: none; }
+        nav.top-nav .links { display: flex; gap: 20px; }
+        nav.top-nav .links a { color: #8b949e; text-decoration: none; font-size: 13px; font-weight: 500; }
+        nav.top-nav .links a:hover, nav.top-nav .links a.active { color: #58a6ff; }
+
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; padding: 16px 24px; }
+        .summary-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 12px 16px; }
+        .summary-card .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+        .summary-card .value { font-size: 20px; font-weight: 700; color: #c9d1d9; margin-top: 4px; font-family: monospace; }
+        .summary-card .value.positive { color: #3fb950; }
+        .summary-card .value.warning { color: #d29922; }
+        .summary-card .sub { font-size: 11px; color: #484f58; margin-top: 2px; }
+
+        .paper-panel { padding: 12px 24px; border-bottom: 1px solid #21262d; background: #0b1018; display: none; }
+        .paper-panel.active { display: block; }
+        .paper-panel h2 { font-size: 12px; text-transform: uppercase; color: #8b949e; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .paper-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
+        .paper-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; }
+        .paper-card .label { font-size: 11px; text-transform: uppercase; color: #8b949e; letter-spacing: 0.5px; }
+        .paper-card .value { font-size: 18px; font-weight: 700; color: #c9d1d9; margin-top: 4px; font-family: monospace; }
+        .paper-card .value.positive { color: #3fb950; }
+        .paper-card .value.negative { color: #f85149; }
+
         .controls { padding: 12px 24px; border-bottom: 1px solid #21262d; display: flex; gap: 16px; align-items: center; }
         .controls label { font-size: 13px; color: #8b949e; }
         .controls select, .controls input { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 13px; }
@@ -26,6 +47,12 @@
         .edge-med { color: #d29922; }
         .edge-low { color: #8b949e; }
         .direction { font-size: 11px; padding: 2px 6px; border-radius: 3px; background: #1f2937; white-space: nowrap; }
+        .market-title { max-width: 300px; }
+        .market-title a { color: #c9d1d9; text-decoration: none; }
+        .market-title a:hover { color: #58a6ff; text-decoration: underline; }
+        .market-links { display: flex; gap: 6px; margin-top: 4px; }
+        .market-links a { font-size: 10px; color: #58a6ff; text-decoration: none; padding: 1px 5px; border: 1px solid #21262d; border-radius: 3px; background: #161b22; white-space: nowrap; }
+        .market-links a:hover { background: #21262d; border-color: #58a6ff; }
         .calibration { font-size: 11px; color: #8b949e; margin-top: 4px; }
         .calibration.real { color: #3fb950; }
         .calibration.noise { color: #d29922; }
@@ -37,25 +64,43 @@
         .refresh-bar .progress { height: 100%; background: #58a6ff; transition: width 1s linear; }
         .empty { text-align: center; padding: 48px; color: #484f58; }
         .price { font-family: monospace; }
-        .paper-panel { padding: 12px 24px; border-bottom: 1px solid #21262d; background: #0b1018; display: none; }
-        .paper-panel.active { display: block; }
-        .paper-panel h2 { font-size: 12px; text-transform: uppercase; color: #8b949e; letter-spacing: 0.5px; margin-bottom: 8px; }
-        .paper-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
-        .paper-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; }
-        .paper-card .label { font-size: 11px; text-transform: uppercase; color: #8b949e; letter-spacing: 0.5px; }
-        .paper-card .value { font-size: 18px; font-weight: 700; color: #c9d1d9; margin-top: 4px; font-family: monospace; }
-        .paper-card .value.positive { color: #3fb950; }
-        .paper-card .value.negative { color: #f85149; }
-        @media (max-width: 768px) { .table-container { padding: 8px; } td, th { padding: 6px 8px; font-size: 12px; } }
+        @media (max-width: 768px) { .table-container { padding: 8px; } td, th { padding: 6px 8px; font-size: 12px; } .summary-grid { grid-template-columns: repeat(2, 1fr); } }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>ArbScanner</h1>
-        <div class="stats">
-            <span>Pairs: <span class="value" id="pairs-count">-</span></span>
-            <span>Opportunities: <span class="value" id="opp-count">-</span></span>
-            <span>Last scan: <span class="value" id="last-scan">-</span></span>
+    <nav class="top-nav">
+        <a href="/" class="brand">ArbScanner</a>
+        <div class="links">
+            <a href="/dashboard" class="active">Dashboard</a>
+            <a href="/backtest">Backtest</a>
+            <a href="/">Home</a>
+        </div>
+    </nav>
+
+    <div class="summary-grid" id="summary-grid">
+        <div class="summary-card">
+            <div class="label">Active Pairs</div>
+            <div class="value" id="pairs-count">-</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Opportunities (24h)</div>
+            <div class="value" id="opp-count">-</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Best Edge</div>
+            <div class="value positive" id="best-edge">-</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Total $ Opportunity</div>
+            <div class="value positive" id="total-profit">-</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Avg Net Edge</div>
+            <div class="value" id="avg-edge">-</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Last Scan</div>
+            <div class="value" id="last-scan" style="font-size:14px;">-</div>
         </div>
     </div>
 
@@ -153,13 +198,30 @@
             return d === 'poly_yes_kalshi_no' ? 'P.Yes + K.No' : 'P.No + K.Yes';
         }
 
-        function escapeAttr(s) {
+        function escapeHtml(s) {
             return String(s == null ? '' : s)
                 .replace(/&/g, '&amp;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#39;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
+        }
+
+        function kalshiEventTicker(marketId) {
+            // Kalshi market IDs like "KXFEDCUT-26JUN" — the event ticker is the
+            // base before any contract-specific suffixes. For most tickers the
+            // event page works with the full ID.
+            return marketId;
+        }
+
+        function renderMarketCell(o) {
+            const title = escapeHtml(o.market_title.length > 50 ? o.market_title.slice(0, 47) + '...' : o.market_title);
+            const kalshiUrl = 'https://kalshi.com/markets/' + encodeURIComponent(o.kalshi_market_id);
+            let links = `<a href="${kalshiUrl}" target="_blank" rel="noopener">Kalshi</a>`;
+            return `<td class="market-title">
+                <div>${title}</div>
+                <div class="market-links">${links}</div>
+            </td>`;
         }
 
         function renderCalibrationBadge(cal) {
@@ -173,8 +235,8 @@
             const avg = Number(cal.avg_mispricing || 0).toFixed(1);
             const note = cal.confidence_note || '';
             const short = `${category} · ${bucket}d · avg ${avg}pt`;
-            const tooltip = escapeAttr(note);
-            return `<span class="calib-badge ${klass}" title="${tooltip}">${label} · ${escapeAttr(short)}</span>`;
+            const tooltip = escapeHtml(note);
+            return `<span class="calib-badge ${klass}" title="${tooltip}">${label} · ${escapeHtml(short)}</span>`;
         }
 
         function formatTime(ts) {
@@ -237,9 +299,24 @@
 
                 updatePaperPanel(paperSummary);
 
+                // Summary cards
                 document.getElementById('pairs-count').textContent = stats.matched_pairs || '-';
                 document.getElementById('opp-count').textContent = opps.length;
                 document.getElementById('last-scan').textContent = new Date().toLocaleTimeString();
+
+                if (opps.length > 0) {
+                    const bestEdge = Math.max(...opps.map(o => o.net_edge));
+                    const totalProfit = opps.reduce((sum, o) => sum + o.expected_profit, 0);
+                    const avgEdge = opps.reduce((sum, o) => sum + o.net_edge, 0) / opps.length;
+
+                    document.getElementById('best-edge').textContent = (bestEdge * 100).toFixed(1) + '%';
+                    document.getElementById('total-profit').textContent = '$' + totalProfit.toFixed(2);
+                    document.getElementById('avg-edge').textContent = (avgEdge * 100).toFixed(1) + '%';
+                } else {
+                    document.getElementById('best-edge').textContent = '-';
+                    document.getElementById('total-profit').textContent = '$0';
+                    document.getElementById('avg-edge').textContent = '-';
+                }
 
                 const tbody = document.getElementById('opp-table');
                 const emptyMsg = document.getElementById('empty-msg');
@@ -253,7 +330,7 @@
 
                 tbody.innerHTML = opps.map(o => `
                     <tr>
-                        <td>${o.market_title.length > 50 ? o.market_title.slice(0, 47) + '...' : o.market_title}</td>
+                        ${renderMarketCell(o)}
                         <td><span class="direction">${formatDirection(o.direction)}</span></td>
                         <td class="price">${(o.poly_price * 100).toFixed(1)}&#162;</td>
                         <td class="price">${(o.kalshi_price * 100).toFixed(1)}&#162;</td>

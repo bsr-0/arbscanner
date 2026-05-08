@@ -30,7 +30,7 @@ class MockOrderLevel:
     """A single level in a mock order book (price + size)."""
 
     price: float
-    amount: float
+    size: float
 
 
 @dataclass

@@ -8,7 +8,13 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; }
 
-        .hero { text-align: center; padding: 80px 24px 60px; max-width: 720px; margin: 0 auto; }
+        nav.top-nav { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-bottom: 1px solid #21262d; }
+        nav.top-nav .brand { font-size: 16px; font-weight: 700; color: #58a6ff; text-decoration: none; }
+        nav.top-nav .links { display: flex; gap: 20px; }
+        nav.top-nav .links a { color: #8b949e; text-decoration: none; font-size: 13px; font-weight: 500; }
+        nav.top-nav .links a:hover { color: #58a6ff; }
+
+        .hero { text-align: center; padding: 64px 24px 48px; max-width: 720px; margin: 0 auto; }
         .hero h1 { font-size: 48px; font-weight: 800; color: #fff; margin-bottom: 16px; }
         .hero h1 span { color: #58a6ff; }
         .hero p { font-size: 18px; color: #8b949e; max-width: 560px; margin: 0 auto 32px; }
@@ -22,16 +28,49 @@
         .cta-secondary { display: inline-block; padding: 12px 32px; background: #21262d; color: #c9d1d9; font-size: 16px; font-weight: 600; border-radius: 6px; text-decoration: none; border: 1px solid #30363d; }
         .cta-secondary:hover { background: #30363d; }
 
-        .section { max-width: 900px; margin: 0 auto; padding: 60px 24px; }
-        .section h2 { font-size: 28px; font-weight: 700; color: #fff; margin-bottom: 12px; }
-        .section p { color: #8b949e; margin-bottom: 24px; }
+        .section { max-width: 960px; margin: 0 auto; padding: 48px 24px; }
+        .section h2 { font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 8px; }
+        .section .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 14px; }
 
-        .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 24px; margin-top: 32px; }
+        /* Live preview table */
+        .preview-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 16px; }
+        .preview-table th { text-align: left; padding: 8px 12px; border-bottom: 2px solid #21262d; color: #8b949e; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+        .preview-table td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+        .preview-table tr:hover { background: #161b22; }
+        .preview-table .positive { color: #3fb950; font-weight: 600; }
+        .preview-table .price { font-family: monospace; }
+        .preview-table .direction { font-size: 11px; padding: 2px 6px; border-radius: 3px; background: #1f2937; white-space: nowrap; }
+        .preview-table .dim { color: #484f58; }
+        .preview-empty { text-align: center; padding: 32px; color: #484f58; font-size: 13px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; margin-top: 16px; }
+        .preview-wrapper { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; overflow: hidden; }
+        .preview-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: #161b22; border-bottom: 1px solid #21262d; }
+        .preview-header .live-dot { display: inline-block; width: 8px; height: 8px; background: #3fb950; border-radius: 50%; margin-right: 6px; animation: pulse 2s infinite; }
+        .preview-header span { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+        .preview-header a { font-size: 12px; color: #58a6ff; text-decoration: none; }
+        .preview-header a:hover { text-decoration: underline; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .blur-overlay { position: relative; }
+        .blur-overlay.blurred tbody tr:nth-child(n+4) { filter: blur(4px); pointer-events: none; user-select: none; }
+        .blur-overlay .upgrade-banner { display: none; position: absolute; bottom: 0; left: 0; right: 0; text-align: center; padding: 24px; background: linear-gradient(transparent, #0d1117 60%); }
+        .blur-overlay.blurred .upgrade-banner { display: block; }
+        .upgrade-banner a { color: #58a6ff; font-weight: 600; text-decoration: none; font-size: 14px; }
+
+        /* Pairs grid */
+        .pairs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-top: 16px; }
+        .pair-card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 16px; }
+        .pair-card .pair-match { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .pair-card .pair-arrow { color: #58a6ff; font-size: 16px; flex-shrink: 0; }
+        .pair-card .pair-title { font-size: 13px; color: #c9d1d9; }
+        .pair-card .pair-platform { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+        .pair-card .pair-meta { display: flex; gap: 12px; margin-top: 8px; font-size: 11px; color: #484f58; }
+        .pair-card .pair-meta .conf { color: #3fb950; }
+
+        .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 24px; margin-top: 24px; }
         .feature { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 24px; }
         .feature h3 { color: #58a6ff; font-size: 16px; margin-bottom: 8px; }
         .feature p { font-size: 14px; color: #8b949e; margin: 0; }
 
-        .pricing { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; max-width: 700px; margin: 32px auto 0; }
+        .pricing { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; max-width: 700px; margin: 24px auto 0; }
         .plan { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 32px; text-align: center; }
         .plan.featured { border-color: #58a6ff; }
         .plan h3 { font-size: 20px; color: #fff; margin-bottom: 8px; }
@@ -54,10 +93,19 @@
 
         .footer { text-align: center; padding: 40px 24px; color: #484f58; font-size: 13px; border-top: 1px solid #21262d; }
 
-        @media (max-width: 600px) { .pricing { grid-template-columns: 1fr; } .hero h1 { font-size: 32px; } .hero-stats { gap: 24px; } }
+        @media (max-width: 600px) { .pricing { grid-template-columns: 1fr; } .hero h1 { font-size: 32px; } .hero-stats { gap: 24px; } .pairs-grid { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
+    <nav class="top-nav">
+        <a href="/" class="brand">ArbScanner</a>
+        <div class="links">
+            <a href="/dashboard">Dashboard</a>
+            <a href="/backtest">Backtest</a>
+            {% if stripe_configured %}<a href="#pricing">Pricing</a>{% endif %}
+        </div>
+    </nav>
+
     <div class="hero">
         <h1>Arb<span>Scanner</span></h1>
         <p>Automated cross-platform arbitrage detection for Polymarket and Kalshi. Find real edge with calibration-aware scoring.</p>
@@ -81,9 +129,53 @@
         {% endif %}
     </div>
 
+    <!-- Live opportunities preview -->
+    <div class="section">
+        <h2>Live Opportunities</h2>
+        <p class="subtitle">Recent arbitrage opportunities detected across Polymarket and Kalshi.</p>
+        <div class="preview-wrapper">
+            <div class="preview-header">
+                <span><span class="live-dot"></span> Live data</span>
+                <a href="/dashboard">View full dashboard &rarr;</a>
+            </div>
+            <div class="blur-overlay" id="preview-container">
+                <table class="preview-table">
+                    <thead>
+                        <tr>
+                            <th>Market</th>
+                            <th>Direction</th>
+                            <th>Poly</th>
+                            <th>Kalshi</th>
+                            <th>Net Edge</th>
+                            <th>Size</th>
+                            <th>$ Opportunity</th>
+                        </tr>
+                    </thead>
+                    <tbody id="preview-table-body"></tbody>
+                </table>
+                <div class="upgrade-banner">
+                    <a href="/dashboard">See all opportunities on the dashboard &rarr;</a>
+                </div>
+            </div>
+        </div>
+        <div class="preview-empty" id="preview-empty" style="display:none;">
+            No opportunities above 1% threshold right now. The scanner checks every 30 seconds.
+        </div>
+    </div>
+
+    <!-- Matched pairs preview -->
+    <div class="section">
+        <h2>Matched Markets</h2>
+        <p class="subtitle">AI-matched identical markets across platforms. These are monitored continuously for price discrepancies.</p>
+        <div class="pairs-grid" id="pairs-grid"></div>
+        <div class="preview-empty" id="pairs-empty" style="display:none;">
+            No matched pairs yet. Run <code>arbscanner match</code> to start matching.
+        </div>
+    </div>
+
     <div class="section">
         <h2>Why ArbScanner?</h2>
-        <p>Nobody else monitors all overlapping markets continuously with net-of-fees calculation and calibration context.</p>
+        <p class="subtitle">Nobody else monitors all overlapping markets continuously with net-of-fees calculation and calibration context.</p>
         <div class="features">
             <div class="feature">
                 <h3>Automated Market Matching</h3>
@@ -106,8 +198,8 @@
                 <p>Instant notifications when opportunities exceed your threshold. Never miss an arb.</p>
             </div>
             <div class="feature">
-                <h3>Historical Logging</h3>
-                <p>Every opportunity logged to SQLite. Track which categories produce real edge over time.</p>
+                <h3>Paper Trading & Backtest</h3>
+                <p>Track hypothetical performance before risking real capital. Full position lifecycle with P&L tracking.</p>
             </div>
         </div>
     </div>
@@ -123,7 +215,7 @@
     {% if stripe_configured %}
     <div class="section" id="pricing">
         <h2>Pricing</h2>
-        <p>Start free. Upgrade when you're ready to trade on every opportunity.</p>
+        <p class="subtitle">Start free. Upgrade when you're ready to trade on every opportunity.</p>
         <div class="pricing">
             <div class="plan">
                 <h3>Free</h3>
@@ -161,8 +253,102 @@
         ArbScanner &copy; 2026. Built with pmxt, sentence-transformers, and Claude.
     </div>
 
-    {% if stripe_configured %}
     <script>
+        function formatDirection(d) {
+            return d === 'poly_yes_kalshi_no' ? 'P.Yes + K.No' : 'P.No + K.Yes';
+        }
+
+        function edgeClass(edge) {
+            if (edge >= 0.02) return 'positive';
+            return '';
+        }
+
+        function truncate(s, n) {
+            return s.length > n ? s.slice(0, n - 1) + '...' : s;
+        }
+
+        async function loadPreview() {
+            try {
+                const resp = await fetch('/api/opportunities?min_edge=0.005&hours=48&limit=8');
+                const opps = await resp.json();
+                const tbody = document.getElementById('preview-table-body');
+                const empty = document.getElementById('preview-empty');
+                const container = document.getElementById('preview-container');
+
+                if (!opps.length) {
+                    container.parentElement.style.display = 'none';
+                    empty.style.display = 'block';
+                    return;
+                }
+
+                if (opps.length > 3) {
+                    container.classList.add('blurred');
+                }
+
+                tbody.innerHTML = opps.map(o => `
+                    <tr>
+                        <td>${truncate(o.market_title, 55)}</td>
+                        <td><span class="direction">${formatDirection(o.direction)}</span></td>
+                        <td class="price">${(o.poly_price * 100).toFixed(1)}&cent;</td>
+                        <td class="price">${(o.kalshi_price * 100).toFixed(1)}&cent;</td>
+                        <td class="${edgeClass(o.net_edge)}">${(o.net_edge * 100).toFixed(1)}%</td>
+                        <td>${o.available_size.toFixed(0)}</td>
+                        <td class="${edgeClass(o.net_edge)}">$${o.expected_profit.toFixed(2)}</td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                document.getElementById('preview-container').parentElement.style.display = 'none';
+                document.getElementById('preview-empty').style.display = 'block';
+            }
+        }
+
+        async function loadPairs() {
+            try {
+                const resp = await fetch('/api/pairs');
+                const data = await resp.json();
+                const grid = document.getElementById('pairs-grid');
+                const empty = document.getElementById('pairs-empty');
+
+                if (!data.pairs || !data.pairs.length) {
+                    grid.style.display = 'none';
+                    empty.style.display = 'block';
+                    return;
+                }
+
+                // Show up to 6 pairs, prioritize highest confidence
+                const pairs = data.pairs
+                    .sort((a, b) => b.confidence - a.confidence)
+                    .slice(0, 6);
+
+                grid.innerHTML = pairs.map(p => `
+                    <div class="pair-card">
+                        <div>
+                            <div class="pair-platform">Polymarket</div>
+                            <div class="pair-title">${truncate(p.poly_title, 60)}</div>
+                        </div>
+                        <div class="pair-match">
+                            <span class="pair-arrow">&harr;</span>
+                        </div>
+                        <div>
+                            <div class="pair-platform">Kalshi</div>
+                            <div class="pair-title">${truncate(p.kalshi_title, 60)}</div>
+                        </div>
+                        <div class="pair-meta">
+                            <span class="conf">${(p.confidence * 100).toFixed(0)}% match</span>
+                            <span>via ${p.source}</span>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                document.getElementById('pairs-grid').style.display = 'none';
+                document.getElementById('pairs-empty').style.display = 'block';
+            }
+        }
+
+        loadPreview();
+        loadPairs();
+
+        {% if stripe_configured %}
         document.getElementById('checkout-btn')?.addEventListener('click', async (e) => {
             e.preventDefault();
             try {
@@ -173,7 +359,7 @@
                 alert('Payment system unavailable. Please try again later.');
             }
         });
+        {% endif %}
     </script>
-    {% endif %}
 </body>
 </html>

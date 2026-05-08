@@ -48,7 +48,7 @@ def test_default_max_trade_usd_is_100():
 @dataclass
 class MockLevel:
     price: float
-    amount: float
+    size: float
 
 
 @dataclass

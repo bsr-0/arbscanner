@@ -11,7 +11,7 @@ from arbscanner.models import MatchedPair
 @dataclass
 class MockOrderLevel:
     price: float
-    amount: float
+    size: float
 
 
 @dataclass

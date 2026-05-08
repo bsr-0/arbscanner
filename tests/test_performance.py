@@ -25,7 +25,7 @@ pytestmark = pytest.mark.slow
 @dataclass
 class MockOrderLevel:
     price: float
-    amount: float
+    size: float
 
 
 @dataclass
