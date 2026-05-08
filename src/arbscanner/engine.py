@@ -293,6 +293,29 @@ def scan_all_pairs(
         except Exception:
             logger.debug("Crypto fair value enrichment unavailable", exc_info=True)
 
+        # Phase 1.5c: polling fair values for approval rating markets
+        try:
+            from arbscanner.polling import get_polling_client
+
+            polling_client = get_polling_client()
+            polling_count = 0
+            for pair in pairs:
+                key = f"{pair.poly_market_id}::{pair.kalshi_market_id}"
+                if key not in fair_values:
+                    kid = pair.kalshi_market_id
+                    if kid.startswith(("KXAPRPOTUS", "KXTRUMPAPPROVAL")):
+                        fv = polling_client.get_fair_value(pair)
+                        if fv is not None:
+                            fair_values[key] = fv
+                            polling_count += 1
+            if polling_count:
+                logger.info(
+                    "Enriched %d pairs with polling fair values",
+                    polling_count,
+                )
+        except Exception:
+            logger.debug("Polling fair value enrichment unavailable", exc_info=True)
+
         # Phase 2: compute arbs locally (fast, no I/O)
         all_opps: list[ArbOpportunity] = []
         for pair in pairs:
