@@ -900,7 +900,7 @@ def test_stripe_webhook_rejects_bad_signature(monkeypatch):
     monkeypatch.setattr(settings, "stripe_webhook_secret", "whsec_xxx")
 
     def _boom(payload, sig, secret):
-        raise stripe.error.SignatureVerificationError("bad sig", sig)
+        raise stripe.SignatureVerificationError("bad sig", sig)
 
     monkeypatch.setattr(stripe.Webhook, "construct_event", _boom)
 

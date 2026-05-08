@@ -20,13 +20,20 @@ from arbscanner.models import ArbOpportunity, MatchedPair
 logger = logging.getLogger(__name__)
 
 
-def _calibration_for(pair: MatchedPair, net_edge: float) -> dict | None:
+def _calibration_for(
+    pair: MatchedPair,
+    net_edge: float,
+    fair_value: object | None = None,
+) -> dict | None:
     """Compute calibration context for an opportunity on this pair.
 
     Returns a dict (as emitted by CalibrationContext.__dict__) or None if the
     pair lacks the metadata needed to score it. Errors in the calibration
     lookup are swallowed and logged — we never want a bad calibration lookup
     to block arb detection.
+
+    If *fair_value* (an ``odds.FairValue`` instance) is provided, its
+    serialized form is attached under the ``fair_value`` key.
     """
     if not pair.category and not pair.resolution_date:
         return None
@@ -49,7 +56,7 @@ def _calibration_for(pair: MatchedPair, net_edge: float) -> dict | None:
     except Exception:
         logger.exception("Calibration lookup failed for pair %s", pair.poly_market_id)
         return None
-    return {
+    result = {
         "category": ctx.category,
         "days_to_resolution": ctx.days_to_resolution,
         "time_bucket": ctx.time_bucket,
@@ -57,17 +64,22 @@ def _calibration_for(pair: MatchedPair, net_edge: float) -> dict | None:
         "edge_likely_real": ctx.edge_likely_real,
         "confidence_note": ctx.confidence_note,
     }
+    if fair_value is not None:
+        result["fair_value"] = fair_value.to_dict()
+    return result
 
 
 def calculate_arb(
     pair: MatchedPair,
     books: dict[str, object | None],
+    fair_value: object | None = None,
 ) -> list[ArbOpportunity]:
     """Calculate arb opportunities for a single matched pair from pre-fetched books.
 
     Args:
         pair: The matched market pair.
         books: Dict mapping outcome_id -> OrderBook (or None if fetch failed).
+        fair_value: Optional ``odds.FairValue`` for sportsbook consensus enrichment.
 
     Checks both directions:
       1. Buy YES on Poly + Buy NO on Kalshi
@@ -113,7 +125,7 @@ def calculate_arb(
                         timestamp=now,
                         category=pair.category,
                         resolution_date=pair.resolution_date,
-                        calibration=_calibration_for(pair, net),
+                        calibration=_calibration_for(pair, net, fair_value),
                     )
                 )
 
@@ -147,7 +159,7 @@ def calculate_arb(
                         timestamp=now,
                         category=pair.category,
                         resolution_date=pair.resolution_date,
-                        calibration=_calibration_for(pair, net),
+                        calibration=_calibration_for(pair, net, fair_value),
                     )
                 )
 
@@ -232,11 +244,36 @@ def scan_all_pairs(
             if book is None:
                 order_book_fetch_failures_total.inc()
 
+        # Phase 1.5: pre-fetch sportsbook fair values (optional, non-blocking)
+        fair_values: dict[str, object] = {}
+        try:
+            from arbscanner.odds import get_odds_client
+
+            odds_client = get_odds_client()
+            if odds_client is not None:
+                for pair in pairs:
+                    if pair.category and pair.category.lower() in (
+                        "sports", "sport",
+                    ):
+                        key = f"{pair.poly_market_id}::{pair.kalshi_market_id}"
+                        fv = odds_client.get_fair_value(pair)
+                        if fv is not None:
+                            fair_values[key] = fv
+                if fair_values:
+                    logger.info(
+                        "Enriched %d pairs with sportsbook fair values",
+                        len(fair_values),
+                    )
+        except Exception:
+            logger.debug("Odds API enrichment unavailable", exc_info=True)
+
         # Phase 2: compute arbs locally (fast, no I/O)
         all_opps: list[ArbOpportunity] = []
         for pair in pairs:
             try:
-                opps = calculate_arb(pair, books)
+                key = f"{pair.poly_market_id}::{pair.kalshi_market_id}"
+                fv = fair_values.get(key)
+                opps = calculate_arb(pair, books, fair_value=fv)
                 all_opps.extend(opps)
             except Exception:
                 logger.exception(

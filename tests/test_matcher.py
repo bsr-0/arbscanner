@@ -254,3 +254,70 @@ def test_candidate_to_matched_pair_prefers_non_empty_category():
     pair = candidate_to_matched_pair(candidate, source="embedding")
     assert pair.category == "sports"
     assert pair.resolution_date == "2026-06-20T00:00:00Z"
+
+
+def test_prune_stale_pairs_removes_resolved():
+    """Pairs with resolution_date in the past are pruned."""
+    from arbscanner.matcher import prune_stale_pairs
+
+    cache = MatchedPairsCache(
+        pairs=[
+            MatchedPair(
+                poly_market_id="p1",
+                poly_title="Old",
+                kalshi_market_id="k1",
+                kalshi_title="Old",
+                confidence=0.9,
+                source="embedding",
+                matched_at="",
+                resolution_date="2020-01-01T00:00:00+00:00",
+            ),
+            MatchedPair(
+                poly_market_id="p2",
+                poly_title="Future",
+                kalshi_market_id="k2",
+                kalshi_title="Future",
+                confidence=0.9,
+                source="embedding",
+                matched_at="",
+                resolution_date="2099-12-31T00:00:00+00:00",
+            ),
+        ],
+    )
+    pruned_cache, removed = prune_stale_pairs(cache)
+    assert removed == 1
+    assert len(pruned_cache.pairs) == 1
+    assert pruned_cache.pairs[0].poly_market_id == "p2"
+
+
+def test_prune_stale_pairs_keeps_no_date():
+    """Pairs without a resolution_date are kept."""
+    from arbscanner.matcher import prune_stale_pairs
+
+    cache = MatchedPairsCache(
+        pairs=[
+            MatchedPair(
+                poly_market_id="p1",
+                poly_title="No date",
+                kalshi_market_id="k1",
+                kalshi_title="No date",
+                confidence=0.9,
+                source="embedding",
+                matched_at="",
+                resolution_date="",
+            ),
+        ],
+    )
+    pruned_cache, removed = prune_stale_pairs(cache)
+    assert removed == 0
+    assert len(pruned_cache.pairs) == 1
+
+
+def test_prune_stale_pairs_empty():
+    """Pruning an empty cache returns 0 removed."""
+    from arbscanner.matcher import prune_stale_pairs
+
+    cache = MatchedPairsCache()
+    pruned_cache, removed = prune_stale_pairs(cache)
+    assert removed == 0
+    assert len(pruned_cache.pairs) == 0

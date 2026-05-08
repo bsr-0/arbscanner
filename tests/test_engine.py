@@ -57,9 +57,15 @@ def test_kalshi_fee_brackets():
 
 
 def test_poly_fee():
-    """Test Polymarket fee calculation."""
+    """Test Polymarket fee calculation (fee on min(price, 1-price))."""
+    # At 50c, min(0.50, 0.50) = 0.50
     assert abs(poly_fee(0.50) - 0.0005) < 1e-10
-    assert abs(poly_fee(1.0) - 0.001) < 1e-10
+    # At 80c, min(0.80, 0.20) = 0.20
+    assert abs(poly_fee(0.80) - 0.0002) < 1e-10
+    # At 20c, min(0.20, 0.80) = 0.20
+    assert abs(poly_fee(0.20) - 0.0002) < 1e-10
+    # At boundary, min(1.0, 0.0) = 0.0
+    assert abs(poly_fee(1.0) - 0.0) < 1e-10
 
 
 def test_arb_positive_edge():

@@ -236,7 +236,14 @@
             const note = cal.confidence_note || '';
             const short = `${category} · ${bucket}d · avg ${avg}pt`;
             const tooltip = escapeHtml(note);
-            return `<span class="calib-badge ${klass}" title="${tooltip}">${label} · ${escapeHtml(short)}</span>`;
+            let html = `<span class="calib-badge ${klass}" title="${tooltip}">${label} · ${escapeHtml(short)}</span>`;
+            if (cal.fair_value) {
+                const fv = cal.fair_value;
+                const prob = (fv.implied_prob * 100).toFixed(0);
+                const tip = `Sportsbook consensus: ${prob}% (${fv.num_bookmakers} bookmakers, spread: ${(fv.spread * 100).toFixed(1)}%)`;
+                html += ` <span class="calib-badge" style="background:rgba(88,166,255,0.15);color:#58a6ff;border:1px solid rgba(88,166,255,0.4);" title="${escapeHtml(tip)}">FV ${prob}%</span>`;
+            }
+            return html;
         }
 
         function formatTime(ts) {

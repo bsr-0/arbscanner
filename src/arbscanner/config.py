@@ -1,5 +1,6 @@
 """Settings and constants for arbscanner."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,6 +8,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -68,6 +71,10 @@ class Settings:
     # enforce the free-tier caps described on the landing page.
     tier: str = field(default_factory=lambda: os.getenv("ARBSCANNER_TIER", "pro").lower())
 
+    # The Odds API — sportsbook fair value enrichment (optional)
+    odds_api_key: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))
+    odds_cache_ttl: int = int(os.getenv("ODDS_CACHE_TTL", "300"))
+
 
 # Free-tier constants from the CLAUDE.md Day 10 spec.
 FREE_MAX_OPPORTUNITIES: int = 3
@@ -96,8 +103,20 @@ def kalshi_fee(price: float) -> float:
 
 
 def poly_fee(price: float, fee_rate: float = 0.001) -> float:
-    """Return the Polymarket taker fee for a contract at the given price."""
-    return price * fee_rate
+    """Return the Polymarket taker fee for a contract at the given price.
+
+    Polymarket charges fees on the smaller side of the contract —
+    ``min(price, 1 - price)`` — not on the full trade price.
+    """
+    return min(price, 1.0 - price) * fee_rate
 
 
 settings = Settings()
+
+# Warn at import time if the web secret key is still the default.
+# This runs once when the module is first loaded.
+if settings.secret_key == "dev-secret-key" and settings.tier != "pro":
+    logger.warning(
+        "ARBSCANNER_SECRET_KEY is unset (using insecure default). "
+        "Set it to a random string before deploying."
+    )

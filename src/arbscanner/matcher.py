@@ -262,6 +262,38 @@ def _dict_to_matched_pair(p: dict) -> MatchedPair:
     return MatchedPair(**filtered)
 
 
+def prune_stale_pairs(cache: MatchedPairsCache) -> tuple[MatchedPairsCache, int]:
+    """Remove pairs whose resolution_date is in the past.
+
+    Returns (pruned_cache, num_removed). Pairs without a resolution_date
+    are kept (we can't know if they've resolved).
+    """
+    now = datetime.now(timezone.utc)
+    kept: list[MatchedPair] = []
+    removed = 0
+
+    for pair in cache.pairs:
+        if not pair.resolution_date:
+            kept.append(pair)
+            continue
+        try:
+            res_dt = datetime.fromisoformat(
+                pair.resolution_date.replace("Z", "+00:00")
+            )
+            if res_dt > now:
+                kept.append(pair)
+            else:
+                removed += 1
+                logger.debug("Pruned stale pair: %s (resolved %s)", pair.poly_title, pair.resolution_date)
+        except ValueError:
+            kept.append(pair)  # unparseable date, keep it
+
+    cache.pairs = kept
+    if removed:
+        logger.info("Pruned %d stale pairs (resolved before %s)", removed, now.date())
+    return cache, removed
+
+
 def load_cache(path: Path | None = None) -> MatchedPairsCache:
     """Load matched pairs cache from disk."""
     path = path or MATCHED_PAIRS_PATH

@@ -1,7 +1,10 @@
 """CLI entry point for arbscanner."""
 
 import argparse
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
 
 from rich.console import Console
 
@@ -42,11 +45,23 @@ def cmd_scan(args: argparse.Namespace) -> None:
         console.print("[red]No matched pairs found. Cannot scan.[/red]")
         sys.exit(1)
 
+    # Prune pairs for resolved markets
+    from arbscanner.matcher import prune_stale_pairs, save_cache as save_pairs_cache
+
+    cache, pruned = prune_stale_pairs(cache)
+    if pruned:
+        save_pairs_cache(cache)
+        console.print(f"[dim]Pruned {pruned} stale pairs (already resolved)[/dim]")
+
     console.print(f"Loaded {len(cache.pairs)} matched pairs (workers: {max_workers})")
 
     alerts_enabled = bool(settings.telegram_bot_token or settings.discord_webhook_url)
     if alerts_enabled:
         console.print(f"[green]Alerts enabled (threshold: {settings.alert_threshold:.1%})[/green]")
+
+    rematch_every = args.rematch_every
+    if rematch_every:
+        console.print(f"[dim]Auto re-matching every {rematch_every} cycles[/dim]")
 
     paper_engine: PaperTradingEngine | None = None
     paper_threshold = args.paper_threshold
@@ -58,8 +73,28 @@ def cmd_scan(args: argparse.Namespace) -> None:
         )
 
     db_conn = get_connection()
+    scan_count = 0
 
     def do_scan():
+        nonlocal cache, scan_count
+        scan_count += 1
+
+        # Periodic re-matching to pick up new markets
+        if rematch_every and scan_count % rematch_every == 0:
+            try:
+                new_poly = fetch_all_markets(poly, "Polymarket")
+                new_kalshi = fetch_all_markets(kalshi, "Kalshi")
+                cache = run_matching(new_poly, new_kalshi)
+                cache, pruned = prune_stale_pairs(cache)
+                if pruned:
+                    save_pairs_cache(cache)
+                logger.info(
+                    "Auto re-match complete: %d pairs (%d pruned)",
+                    len(cache.pairs), pruned,
+                )
+            except Exception:
+                logger.debug("Auto re-match failed, continuing with existing pairs", exc_info=True)
+
         opps = scan_all_pairs(
             poly, kalshi, cache.pairs, threshold=threshold, max_workers=max_workers
         )
@@ -106,8 +141,27 @@ def _auto_open_paper_positions(engine, opps, threshold: float) -> None:
 
 def cmd_match(args: argparse.Namespace) -> None:
     """Run the market matching pipeline."""
+    from arbscanner.matcher import prune_stale_pairs, save_cache as save_pairs_cache
+
+    if args.prune_only:
+        cache = load_cache()
+        cache, pruned = prune_stale_pairs(cache)
+        if pruned:
+            save_pairs_cache(cache)
+            console.print(f"[green]Pruned {pruned} stale pairs. {len(cache.pairs)} remaining.[/green]")
+        else:
+            console.print(f"[dim]No stale pairs to prune. {len(cache.pairs)} active.[/dim]")
+        return
+
     console.print("[bold]Initializing exchanges...[/bold]")
     poly, kalshi = create_exchanges()
+
+    # Prune stale pairs before fetching new markets
+    existing_cache = load_cache()
+    existing_cache, pruned = prune_stale_pairs(existing_cache)
+    if pruned:
+        save_pairs_cache(existing_cache)
+        console.print(f"[dim]Pruned {pruned} stale pairs before matching[/dim]")
 
     console.print("Fetching markets from Polymarket...")
     poly_markets = fetch_all_markets(poly, "Polymarket")
@@ -525,6 +579,73 @@ def cmd_execute(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_export(args: argparse.Namespace) -> None:
+    """Export scanner data to static JSON for the GitHub Pages dashboard."""
+    from pathlib import Path
+
+    from arbscanner.export import export_dashboard_data
+
+    output = Path(args.output) if args.output else None
+    path = export_dashboard_data(
+        hours=args.hours, min_edge=args.min_edge, limit=args.limit, output_path=output
+    )
+    console.print(f"[green]Exported dashboard data to {path}[/green]")
+
+
+def cmd_odds(args: argparse.Namespace) -> None:
+    """Fetch and display sportsbook fair values for matched sports pairs."""
+    from arbscanner.matcher import load_cache
+    from arbscanner.odds import OddsClient
+
+    api_key = settings.odds_api_key
+    if not api_key:
+        console.print("[red]ODDS_API_KEY not set. Add it to .env[/red]")
+        sys.exit(1)
+
+    client = OddsClient(api_key, cache_ttl=settings.odds_cache_ttl)
+
+    if args.list_sports:
+        console.print("[bold]Available sports from The Odds API:[/bold]")
+        sports = client.fetch_available_sports()
+        if not sports:
+            console.print("[dim]  No sports returned (check API key)[/dim]")
+        for s in sports:
+            console.print(f"  {s}")
+        return
+
+    cache = load_cache()
+    sports_pairs = [
+        p for p in cache.pairs
+        if p.category and p.category.lower() in ("sports", "sport")
+    ]
+
+    if not sports_pairs:
+        console.print("[yellow]No sports pairs in matched_pairs.json[/yellow]")
+        return
+
+    console.print(f"[bold]{len(sports_pairs)} sports pairs, checking top {args.limit}...[/bold]\n")
+
+    matched = 0
+    for pair in sports_pairs[: args.limit]:
+        fv = client.get_fair_value(pair)
+        if fv:
+            matched += 1
+            console.print(
+                f"  [green]{pair.poly_title}[/green]\n"
+                f"    Fair value: {fv.implied_prob:.1%} "
+                f"({fv.num_bookmakers} bookmakers, spread: {fv.spread:.1%})\n"
+                f"    Event: {fv.home_team} vs {fv.away_team} ({fv.sport_key})"
+            )
+        else:
+            console.print(f"  [dim]{pair.poly_title} — no odds data[/dim]")
+
+    console.print(
+        f"\n[bold]Matched {matched}/{min(len(sports_pairs), args.limit)} sports pairs[/bold]"
+    )
+    if client._requests_remaining is not None:
+        console.print(f"[dim]API requests remaining: {client._requests_remaining}[/dim]")
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     """Run the preflight environment checker and exit non-zero on hard failures."""
     from arbscanner.doctor import exit_code, render, run_all_checks
@@ -635,6 +756,12 @@ def main() -> None:
         help=f"Parallel workers for order book fetches (default: {settings.max_workers})",
     )
     scan_parser.add_argument(
+        "--rematch-every",
+        type=int,
+        default=0,
+        help="Re-run market matching every N scan cycles to catch new markets (0 = disabled)",
+    )
+    scan_parser.add_argument(
         "--paper",
         action="store_true",
         help="Auto-open simulated paper trading positions for high-edge opportunities",
@@ -654,6 +781,11 @@ def main() -> None:
 
     # match command
     match_parser = subparsers.add_parser("match", help="Run market matching pipeline")
+    match_parser.add_argument(
+        "--prune-only",
+        action="store_true",
+        help="Only remove resolved pairs from cache (no new matching)",
+    )
     match_parser.add_argument(
         "--rematch", action="store_true", help="Force full re-matching (ignore cache)"
     )
@@ -807,6 +939,34 @@ def main() -> None:
         help="Starting paper balance for the replay (default: 10000)",
     )
 
+    # export command
+    export_parser = subparsers.add_parser(
+        "export", help="Export scanner data to static JSON for GitHub Pages"
+    )
+    export_parser.add_argument(
+        "--hours", type=int, default=24, help="Lookback window in hours (default: 24)"
+    )
+    export_parser.add_argument(
+        "--min-edge", type=float, default=0.0, help="Min net edge filter"
+    )
+    export_parser.add_argument(
+        "--limit", type=int, default=100, help="Max opportunities to export"
+    )
+    export_parser.add_argument(
+        "--output", type=str, default=None, help="Output JSON path (default: docs/data.json)"
+    )
+
+    # odds command
+    odds_parser = subparsers.add_parser(
+        "odds", help="Fetch sportsbook fair values for sports pairs"
+    )
+    odds_parser.add_argument(
+        "--list-sports", action="store_true", help="List available sports from The Odds API"
+    )
+    odds_parser.add_argument(
+        "--limit", type=int, default=20, help="Max pairs to check (default: 20)"
+    )
+
     # doctor command
     doctor_parser = subparsers.add_parser(
         "doctor", help="Preflight: validate env, deps, sidecar, and data files"
@@ -852,6 +1012,8 @@ def main() -> None:
         "paper": cmd_paper,
         "backtest": cmd_backtest,
         "execute": cmd_execute,
+        "export": cmd_export,
+        "odds": cmd_odds,
         "doctor": cmd_doctor,
     }
     commands[args.command](args)
