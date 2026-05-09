@@ -71,8 +71,11 @@ class Settings:
     # enforce the free-tier caps described on the landing page.
     tier: str = field(default_factory=lambda: os.getenv("ARBSCANNER_TIER", "pro").lower())
 
-    # The Odds API — sportsbook fair value enrichment (optional)
+    # Sportsbook fair value enrichment (optional).
+    # Each provider has its own key. ODDS_PROVIDER selects the primary.
     odds_api_key: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))
+    oddspapi_api_key: str = field(default_factory=lambda: os.getenv("ODDSPAPI_API_KEY", ""))
+    odds_api_io_key: str = field(default_factory=lambda: os.getenv("ODDS_API_IO_KEY", ""))
     odds_cache_ttl: int = int(os.getenv("ODDS_CACHE_TTL", "300"))
 
 

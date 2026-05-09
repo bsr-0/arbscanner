@@ -559,24 +559,46 @@ def _resolve_provider() -> str:
 
 
 class OddsClient:
-    """Multi-backend odds client with caching and automatic fallback."""
+    """Multi-backend odds client with caching and automatic fallback.
 
-    def __init__(self, api_key: str, cache_ttl: int = 300, provider: str | None = None):
-        self._api_key = api_key
+    Each backend can have its own API key. The client builds a chain
+    from whichever keys are available, with the preferred provider first.
+    """
+
+    def __init__(
+        self,
+        *,
+        cache_ttl: int = 300,
+        provider: str | None = None,
+        keys: dict[str, str] | None = None,
+        api_key: str = "",
+    ):
+        """Create a multi-backend client.
+
+        Args:
+            cache_ttl: TTL for cached odds data in seconds.
+            provider: Preferred provider name (falls back to ODDS_PROVIDER env).
+            keys: Dict mapping provider name -> API key. Providers without
+                a key are skipped entirely.
+            api_key: Legacy single-key mode. If ``keys`` is not provided,
+                this key is used for all backends.
+        """
         self._cache = OddsCache(ttl_seconds=cache_ttl)
         self._matcher = EventMatcher()
         self._available_sports: set[str] | None = None
 
-        # Build backend chain: preferred first, then fallbacks
+        if keys is None:
+            keys = {name: api_key for name in PROVIDERS if api_key}
+
         preferred = provider or _resolve_provider()
         self._backends: list[OddsBackend] = []
-        # Add preferred backend first
-        if preferred in PROVIDERS:
-            self._backends.append(PROVIDERS[preferred](api_key))
-        # Add remaining as fallbacks
-        for name in FALLBACK_ORDER:
-            if name != preferred and name in PROVIDERS:
-                self._backends.append(PROVIDERS[name](api_key))
+
+        # Build ordered backend list: preferred first, then fallbacks
+        ordered = [preferred] + [n for n in FALLBACK_ORDER if n != preferred]
+        for name in ordered:
+            key = keys.get(name, "")
+            if key and name in PROVIDERS:
+                self._backends.append(PROVIDERS[name](key))
 
         self._active_backend: OddsBackend | None = self._backends[0] if self._backends else None
         self.requests_remaining: int | None = None
@@ -678,14 +700,21 @@ _client_lock = threading.Lock()
 
 
 def get_odds_client() -> OddsClient | None:
-    """Return a shared OddsClient, or None if ODDS_API_KEY is not set."""
+    """Return a shared OddsClient, or None if no odds API keys are set."""
     global _client
-    if not settings.odds_api_key:
+    keys = {
+        "the-odds-api": settings.odds_api_key,
+        "oddspapi": settings.oddspapi_api_key,
+        "odds-api-io": settings.odds_api_io_key,
+    }
+    # Filter to providers that actually have a key
+    available = {k: v for k, v in keys.items() if v}
+    if not available:
         return None
     with _client_lock:
         if _client is None:
             _client = OddsClient(
-                api_key=settings.odds_api_key,
+                keys=available,
                 cache_ttl=settings.odds_cache_ttl,
             )
         return _client

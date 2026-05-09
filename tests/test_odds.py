@@ -389,9 +389,8 @@ class TestOddsClientNoKey:
     def test_get_odds_client_returns_none(self):
         with patch("arbscanner.odds.settings") as mock_settings:
             mock_settings.odds_api_key = ""
-            # Re-import to get fresh module state isn't needed since
-            # get_odds_client checks settings.odds_api_key directly.
-            # But we need to reset the cached client.
+            mock_settings.oddspapi_api_key = ""
+            mock_settings.odds_api_io_key = ""
             import arbscanner.odds as odds_mod
             odds_mod._client = None
             result = get_odds_client()
@@ -400,7 +399,7 @@ class TestOddsClientNoKey:
 
 class TestOddsClientGetFairValue:
     def _make_client(self):
-        client = OddsClient("test_key", cache_ttl=60, provider="the-odds-api")
+        client = OddsClient(api_key="test_key", cache_ttl=60, provider="the-odds-api")
         client._available_sports = set()
         return client
 
@@ -424,24 +423,39 @@ class TestOddsClientGetFairValue:
 
 class TestMultiBackend:
     def test_provider_selection(self):
-        client = OddsClient("key", provider="oddspapi")
+        client = OddsClient(api_key="key", provider="oddspapi")
         assert client.provider_name == "oddspapi"
 
     def test_default_provider(self):
-        client = OddsClient("key", provider="the-odds-api")
+        client = OddsClient(api_key="key", provider="the-odds-api")
         assert client.provider_name == "the-odds-api"
 
-    def test_fallback_order(self):
-        client = OddsClient("key", provider="the-odds-api")
+    def test_fallback_order_single_key(self):
+        client = OddsClient(api_key="key", provider="the-odds-api")
         names = [b.name for b in client._backends]
         assert names[0] == "the-odds-api"
-        assert len(names) == 3  # all three backends
+        assert len(names) == 3  # all three backends share the single key
 
-    def test_backends_have_correct_types(self):
-        from arbscanner.odds import TheOddsApiBackend, OddsApiIoBackend, OddsPapiBackend
-        client = OddsClient("key", provider="the-odds-api")
-        assert isinstance(client._backends[0], TheOddsApiBackend)
+    def test_per_provider_keys(self):
+        from arbscanner.odds import TheOddsApiBackend, OddsPapiBackend
+        client = OddsClient(
+            keys={"the-odds-api": "key1", "oddspapi": "key2"},
+            provider="oddspapi",
+        )
+        assert len(client._backends) == 2
+        assert isinstance(client._backends[0], OddsPapiBackend)
+        assert isinstance(client._backends[1], TheOddsApiBackend)
+        assert client._backends[0]._api_key == "key2"
+        assert client._backends[1]._api_key == "key1"
+
+    def test_missing_key_skips_provider(self):
+        client = OddsClient(
+            keys={"oddspapi": "only-this-one"},
+            provider="oddspapi",
+        )
+        assert len(client._backends) == 1
+        assert client.provider_name == "oddspapi"
 
     def test_provider_name_reflects_active(self):
-        client = OddsClient("key", provider="odds-api-io")
+        client = OddsClient(api_key="key", provider="odds-api-io")
         assert client.provider_name == "odds-api-io"

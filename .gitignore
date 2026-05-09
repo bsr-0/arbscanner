@@ -207,5 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 # Arbscanner
-data/
+data/*
+!data/matched_pairs.json
 arbscanner.db

@@ -106,6 +106,20 @@ def cmd_scan(args: argparse.Namespace) -> None:
         return opps, len(cache.pairs)
 
     paper_summary_fn = paper_engine.summary if paper_engine is not None else None
+
+    if getattr(args, "once", False):
+        try:
+            opps, pair_count = do_scan()
+            console.print(
+                f"[green]Scan complete: {len(opps)} opportunit{'y' if len(opps) == 1 else 'ies'} "
+                f"across {pair_count} pairs[/green]"
+            )
+        finally:
+            db_conn.close()
+            if paper_engine is not None:
+                paper_engine.close()
+        return
+
     try:
         run_dashboard(do_scan, interval=interval, paper_summary_fn=paper_summary_fn)
     finally:
@@ -595,14 +609,16 @@ def cmd_export(args: argparse.Namespace) -> None:
 def cmd_odds(args: argparse.Namespace) -> None:
     """Fetch and display sportsbook fair values for matched sports pairs."""
     from arbscanner.matcher import load_cache
-    from arbscanner.odds import OddsClient
+    from arbscanner.odds import get_odds_client
 
-    api_key = settings.odds_api_key
-    if not api_key:
-        console.print("[red]ODDS_API_KEY not set. Add it to .env[/red]")
+    client = get_odds_client()
+    if client is None:
+        console.print(
+            "[red]No odds API keys set. Add ODDS_API_KEY, ODDSPAPI_API_KEY, "
+            "or ODDS_API_IO_KEY to .env[/red]"
+        )
         sys.exit(1)
 
-    client = OddsClient(api_key, cache_ttl=settings.odds_cache_ttl)
     console.print(f"[dim]Provider: {client.provider_name}[/dim]")
 
     if args.list_sports:
@@ -756,6 +772,11 @@ def main() -> None:
         type=int,
         default=settings.max_workers,
         help=f"Parallel workers for order book fetches (default: {settings.max_workers})",
+    )
+    scan_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single scan cycle and exit (no live dashboard; useful for CI/cron)",
     )
     scan_parser.add_argument(
         "--rematch-every",
