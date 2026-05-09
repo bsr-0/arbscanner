@@ -31,8 +31,8 @@ class Settings:
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
 
     # Data pipeline tuning
-    max_workers: int = 8  # ThreadPoolExecutor size for parallel scanning
-    rate_limit_per_sec: float = 10.0  # Shared pmxt call rate limit
+    max_workers: int = int(os.getenv("MAX_WORKERS", "8"))
+    rate_limit_per_sec: float = float(os.getenv("RATE_LIMIT_PER_SEC", "10.0"))
     retry_attempts: int = 3  # Retry count for transient exchange failures
     retry_base_delay: float = 0.5  # Initial retry backoff in seconds
 
