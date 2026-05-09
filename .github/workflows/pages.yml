@@ -2,12 +2,11 @@ name: Update GitHub Pages Dashboard
 
 on:
   schedule:
-    - cron: '0 12 * * *'  # Once daily at noon UTC
+    - cron: '0 * * * *'  # Hourly
   workflow_dispatch: # Allow manual trigger
 
 permissions:
   contents: write
-  pages: write
 
 jobs:
   export:
