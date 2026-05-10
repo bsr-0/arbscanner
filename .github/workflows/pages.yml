@@ -2,14 +2,32 @@ name: Update GitHub Pages Dashboard
 
 on:
   schedule:
-    - cron: '0 12 * * *'  # Daily at noon UTC
-  workflow_dispatch: # Allow manual trigger
+    - cron: "0 12 * * *"  # Daily at noon UTC
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/pages.yml"
+      - "src/arbscanner/site/**"
+      - "src/arbscanner/export.py"
+      - "src/arbscanner/matcher.py"
+      - "src/arbscanner/config.py"
+      - "src/arbscanner/cli.py"
+      - "Makefile"
+      - "README.md"
+      - "pyproject.toml"
+      - "uv.lock"
 
 permissions:
   contents: write
 
+concurrency:
+  group: pages-dashboard
+  cancel-in-progress: false
+
 jobs:
-  export:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -29,30 +47,41 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-pages-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-pages-
+
       - name: Install dependencies
         run: uv sync
 
       - name: Install pmxtjs sidecar
         run: npm install -g pmxtjs
 
-      - name: Run scanner and export data
+      - name: Refresh site data
         env:
           KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RATE_LIMIT_PER_SEC: "50"
         run: |
-          timeout 2400 uv run arbscanner scan --once --threshold 0.0 --max-workers 16 || true
-          uv run arbscanner export --hours 24 --output docs/data.json
+          timeout 2400 uv run arbscanner scan --once --threshold 0.0 --max-workers 16
+          uv run arbscanner site --hours 24
 
-      - name: Commit and push data
+      - name: Verify generated site
+        run: uv run arbscanner site --verify-only --max-data-age-minutes 15
+
+      - name: Commit and push generated site
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/data.json
+          git add docs/index.html docs/data.json
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update dashboard data [skip ci]"
+            git commit -m "Update Pages dashboard [skip ci]"
             git push
           fi

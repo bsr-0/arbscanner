@@ -3,7 +3,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install install-node test test-fast lint format scan match serve \
+.PHONY: help install install-node test test-fast lint format scan match serve pages \
         doctor clean clean-data docker-build docker-run docker-logs
 
 help: ## Show this help message
@@ -20,6 +20,7 @@ help: ## Show this help message
 	@echo "  scan          Run the live arb scanner dashboard"
 	@echo "  match         Run the market matching pipeline"
 	@echo "  serve         Start the FastAPI web server with auto-reload"
+	@echo "  pages         Build the static GitHub Pages site into docs/"
 	@echo "  clean         Remove Python build/cache artifacts"
 	@echo "  clean-data    Remove the scanner database and data/ directory (prompts)"
 	@echo "  docker-build  Build the arbscanner Docker image"
@@ -55,6 +56,9 @@ match: ## Run the market matching pipeline
 
 serve: ## Start the FastAPI web server with auto-reload
 	uv run arbscanner serve --reload
+
+pages: ## Build the static GitHub Pages site into docs/
+	uv run arbscanner site
 
 clean: ## Remove Python build/cache artifacts
 	rm -rf .pytest_cache .ruff_cache dist build

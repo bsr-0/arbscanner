@@ -7,13 +7,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
-import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from arbscanner.config import MATCHED_PAIRS_PATH, settings
 from arbscanner.models import CandidatePair, MatchedPair, MatchedPairsCache
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_RANK = {
+    "manual": 3,
+    "embedding+llm": 2,
+    "embedding": 1,
+}
 
 # Common abbreviation expansions for normalization
 ABBREVIATIONS = {
@@ -262,6 +267,81 @@ def _dict_to_matched_pair(p: dict) -> MatchedPair:
     return MatchedPair(**filtered)
 
 
+def _pair_quality(pair: MatchedPair) -> tuple:
+    """Return a deterministic sort key for resolving duplicate pair conflicts.
+
+    We prefer manually curated matches, then higher-confidence automated
+    matches, then entries with richer metadata / outcome IDs, and finally the
+    newest record. The resulting ordering is used by ``dedupe_pairs`` to keep a
+    single best pair for each Polymarket ID and each Kalshi ID.
+    """
+    metadata_score = sum(
+        bool(value)
+        for value in (
+            pair.category,
+            pair.resolution_date,
+            pair.poly_yes_outcome_id,
+            pair.poly_no_outcome_id,
+            pair.kalshi_yes_outcome_id,
+            pair.kalshi_no_outcome_id,
+        )
+    )
+    try:
+        matched_at = datetime.fromisoformat(pair.matched_at.replace("Z", "+00:00"))
+    except ValueError:
+        matched_at = datetime.min.replace(tzinfo=timezone.utc)
+    return (
+        _SOURCE_RANK.get(pair.source, 0),
+        round(pair.confidence, 8),
+        metadata_score,
+        matched_at.timestamp(),
+    )
+
+
+def dedupe_pairs(pairs: list[MatchedPair]) -> tuple[list[MatchedPair], int]:
+    """Enforce a one-to-one mapping between Polymarket and Kalshi markets.
+
+    The matcher historically allowed a single run to confirm multiple pairs
+    that reused the same Polymarket or Kalshi market. That creates invalid
+    many-to-many caches and downstream duplicate Pages rows. We greedily keep
+    the highest-quality pair for each side and drop the rest.
+    """
+    if len(pairs) < 2:
+        return list(pairs), 0
+
+    ranked = sorted(
+        enumerate(pairs),
+        key=lambda item: (_pair_quality(item[1]), -item[0]),
+        reverse=True,
+    )
+
+    used_poly: set[str] = set()
+    used_kalshi: set[str] = set()
+    keep_indices: set[int] = set()
+
+    for idx, pair in ranked:
+        if pair.poly_market_id in used_poly or pair.kalshi_market_id in used_kalshi:
+            continue
+        used_poly.add(pair.poly_market_id)
+        used_kalshi.add(pair.kalshi_market_id)
+        keep_indices.add(idx)
+
+    kept = [pair for idx, pair in enumerate(pairs) if idx in keep_indices]
+    removed = len(pairs) - len(kept)
+    return kept, removed
+
+
+def sanitize_cache(cache: MatchedPairsCache) -> tuple[MatchedPairsCache, int]:
+    """Normalize a cache in-memory and drop conflicting duplicate pairs."""
+    cache.pairs, removed = dedupe_pairs(cache.pairs)
+    if removed:
+        logger.warning(
+            "Dropped %d conflicting matched pair(s) while sanitizing cache",
+            removed,
+        )
+    return cache, removed
+
+
 def prune_stale_pairs(cache: MatchedPairsCache) -> tuple[MatchedPairsCache, int]:
     """Remove pairs whose resolution_date is in the past.
 
@@ -302,7 +382,7 @@ def load_cache(path: Path | None = None) -> MatchedPairsCache:
     try:
         data = json.loads(path.read_text())
         pairs = [_dict_to_matched_pair(p) for p in data.get("pairs", [])]
-        return MatchedPairsCache(
+        cache = MatchedPairsCache(
             version=data.get("version", 1),
             updated_at=data.get("updated_at", ""),
             pairs=pairs,
@@ -312,11 +392,15 @@ def load_cache(path: Path | None = None) -> MatchedPairsCache:
         logger.exception("Failed to load cache from %s", path)
         return MatchedPairsCache()
 
+    cache, _ = sanitize_cache(cache)
+    return cache
+
 
 def save_cache(cache: MatchedPairsCache, path: Path | None = None) -> None:
     """Save matched pairs cache to disk."""
     path = path or MATCHED_PAIRS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
+    cache, _ = sanitize_cache(cache)
     cache.updated_at = datetime.now(timezone.utc).isoformat()
     data = {
         "version": cache.version,
@@ -401,6 +485,9 @@ def run_matching(
         else:
             cache.rejected.append(pair_key)
 
+    cache, removed = sanitize_cache(cache)
+    if removed:
+        logger.info("Discarded %d duplicate/conflicting pair(s) after matching", removed)
     save_cache(cache)
     logger.info(
         "Matching complete: %d total pairs, %d rejected",

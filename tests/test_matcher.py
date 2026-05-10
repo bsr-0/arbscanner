@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from arbscanner.matcher import load_cache, normalize_title, save_cache
+from arbscanner.matcher import dedupe_pairs, load_cache, normalize_title, save_cache
 from arbscanner.models import MatchedPair, MatchedPairsCache
 
 
@@ -254,6 +254,103 @@ def test_candidate_to_matched_pair_prefers_non_empty_category():
     pair = candidate_to_matched_pair(candidate, source="embedding")
     assert pair.category == "sports"
     assert pair.resolution_date == "2026-06-20T00:00:00Z"
+
+
+def test_dedupe_pairs_enforces_one_to_one_mapping():
+    """Duplicate Polymarket / Kalshi IDs should collapse to the best pair."""
+    pairs = [
+        MatchedPair(
+            poly_market_id="p1",
+            poly_title="Market A",
+            kalshi_market_id="k1",
+            kalshi_title="Kalshi A",
+            confidence=0.70,
+            source="embedding",
+            matched_at="2026-04-10T00:00:00+00:00",
+        ),
+        MatchedPair(
+            poly_market_id="p1",
+            poly_title="Market A better",
+            kalshi_market_id="k2",
+            kalshi_title="Kalshi B",
+            confidence=0.95,
+            source="embedding+llm",
+            matched_at="2026-04-11T00:00:00+00:00",
+        ),
+        MatchedPair(
+            poly_market_id="p3",
+            poly_title="Market C",
+            kalshi_market_id="k2",
+            kalshi_title="Kalshi B reused",
+            confidence=0.80,
+            source="embedding",
+            matched_at="2026-04-10T12:00:00+00:00",
+        ),
+        MatchedPair(
+            poly_market_id="p4",
+            poly_title="Manual keep",
+            kalshi_market_id="k4",
+            kalshi_title="Kalshi D",
+            confidence=0.40,
+            source="manual",
+            matched_at="2026-04-09T00:00:00+00:00",
+        ),
+    ]
+
+    deduped, removed = dedupe_pairs(pairs)
+
+    assert removed == 2
+    assert [(p.poly_market_id, p.kalshi_market_id) for p in deduped] == [
+        ("p1", "k2"),
+        ("p4", "k4"),
+    ]
+
+
+def test_load_cache_sanitizes_conflicting_duplicates():
+    """Loading an old cache file should drop invalid many-to-many entries."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "dirty.json"
+        payload = {
+            "version": 1,
+            "updated_at": "2026-04-10T00:00:00Z",
+            "pairs": [
+                {
+                    "poly_market_id": "p1",
+                    "poly_title": "A",
+                    "kalshi_market_id": "k1",
+                    "kalshi_title": "K1",
+                    "confidence": 0.50,
+                    "source": "embedding",
+                    "matched_at": "2026-04-10T00:00:00Z",
+                },
+                {
+                    "poly_market_id": "p1",
+                    "poly_title": "A better",
+                    "kalshi_market_id": "k2",
+                    "kalshi_title": "K2",
+                    "confidence": 0.90,
+                    "source": "embedding+llm",
+                    "matched_at": "2026-04-11T00:00:00Z",
+                },
+                {
+                    "poly_market_id": "p3",
+                    "poly_title": "C",
+                    "kalshi_market_id": "k2",
+                    "kalshi_title": "K2 reused",
+                    "confidence": 0.80,
+                    "source": "embedding",
+                    "matched_at": "2026-04-10T12:00:00Z",
+                },
+            ],
+            "rejected": [],
+        }
+        path.write_text(json.dumps(payload))
+
+        loaded = load_cache(path)
+
+        assert [(p.poly_market_id, p.kalshi_market_id) for p in loaded.pairs] == [
+            ("p1", "k2"),
+        ]
 
 
 def test_prune_stale_pairs_removes_resolved():

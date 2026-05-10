@@ -396,10 +396,11 @@ If `/ready` returns 503, check logs — the most common causes are missing match
 
 ## CI/CD
 
-The repository includes two GitHub Actions workflows:
+The repository includes three GitHub Actions workflows:
 
 - **`.github/workflows/ci.yml`** — runs `pytest` and `ruff` on every push and PR
 - **`.github/workflows/docker.yml`** — builds and publishes multi-arch Docker images to `ghcr.io/bsr-0/arbscanner` on every `v*.*.*` tag push
+- **`.github/workflows/pages.yml`** — runs the scanner, builds the static Pages dashboard with `arbscanner site`, and commits refreshed `docs/` artifacts on a daily schedule, on manual dispatch, and when the site/build code changes on `main`
 
 Tagging a release is enough to cut a new image:
 

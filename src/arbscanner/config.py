@@ -17,6 +17,11 @@ DB_PATH = PROJECT_ROOT / "arbscanner.db"
 MATCHED_PAIRS_PATH = DATA_DIR / "matched_pairs.json"
 CALIBRATION_DATA_DIR = DATA_DIR / "calibration"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+SITE_TEMPLATE_DIR = Path(__file__).resolve().parent / "site"
+SITE_TEMPLATE_PATH = SITE_TEMPLATE_DIR / "index.html"
+PAGES_DIST_DIR = PROJECT_ROOT / "docs"
+PAGES_INDEX_PATH = PAGES_DIST_DIR / "index.html"
+PAGES_DATA_PATH = PAGES_DIST_DIR / "data.json"
 
 
 @dataclass

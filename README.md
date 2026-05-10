@@ -16,6 +16,7 @@ Every candidate opportunity is scored against a historical calibration layer der
 - **Liquidity-aware sizing**: every opportunity reports minimum cross-platform size and expected dollar profit
 - **Rich terminal dashboard** that refreshes on a configurable interval, highlighting net edges above threshold
 - **FastAPI web dashboard** with a live-updating HTML table and JSON API
+- **Static GitHub Pages dashboard build** from a checked-in site template plus exported scanner data
 - **Telegram + Discord webhooks** for real-time alerts when edge crosses a threshold
 - **SQLite opportunity log** for historical analysis and backtesting
 - **Paper trading simulator** that auto-opens simulated positions on high-edge opportunities, tracks expected-vs-realized edge, and exposes a CLI + JSON API for the account
@@ -97,7 +98,10 @@ uv run arbscanner scan --interval 30 --threshold 0.01
 uv run arbscanner serve --port 8000
 #    open http://localhost:8000/dashboard
 
-# 6. (Optional) Ingest historical resolutions for calibration context
+# 6. Build the static Pages dashboard into docs/
+uv run arbscanner site
+
+# 7. (Optional) Ingest historical resolutions for calibration context
 uv run arbscanner calibrate --ingest-live --limit 500
 ```
 
@@ -203,6 +207,35 @@ Every instance also exposes `/metrics` in Prometheus text exposition format (ver
 ```bash
 curl -s http://localhost:8000/metrics | head -20
 ```
+
+### `arbscanner site` — static Pages build
+
+Builds the static dashboard into `docs/` by copying the source template from
+`src/arbscanner/site/index.html` and regenerating `docs/data.json` from the
+current SQLite opportunities log and `data/matched_pairs.json`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--hours` | `24` | Lookback window in hours |
+| `--min-edge` | `0.0` | Min net edge filter |
+| `--limit` | `100` | Max opportunities exported into the static site |
+| `--output-dir` | `docs/` | Alternate build output directory |
+| `--verify-only` | off | Validate an existing built site instead of rebuilding |
+| `--max-data-age-minutes` | `30` | Freshness threshold for `--verify-only` |
+
+```bash
+# Build the default GitHub Pages output
+uv run arbscanner site
+
+# Equivalent Make target
+make pages
+
+# Validate that the generated site is structurally sound and fresh
+uv run arbscanner site --verify-only --max-data-age-minutes 15
+```
+
+If you only want the JSON payload and not the HTML copy step, use
+`uv run arbscanner export`.
 
 ### `arbscanner paper` — paper trading account
 

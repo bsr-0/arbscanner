@@ -4,8 +4,6 @@ import argparse
 import logging
 import sys
 
-logger = logging.getLogger(__name__)
-
 from rich.console import Console
 
 from arbscanner.config import settings
@@ -15,6 +13,8 @@ from arbscanner.engine import scan_all_pairs
 from arbscanner.exchanges import create_exchanges, fetch_all_markets
 from arbscanner.logging_config import setup_logging
 from arbscanner.matcher import load_cache, run_matching
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -614,6 +614,36 @@ def cmd_export(args: argparse.Namespace) -> None:
     console.print(f"[green]Exported dashboard data to {path}[/green]")
 
 
+def cmd_site(args: argparse.Namespace) -> None:
+    """Build the static GitHub Pages site."""
+    from pathlib import Path
+
+    from arbscanner.site import build_pages_site, validate_pages_site
+
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    if args.verify_only:
+        result = validate_pages_site(
+            output_dir=output_dir,
+            max_data_age_minutes=args.max_data_age_minutes,
+        )
+        console.print(
+            "[green]Validated static site:[/green] "
+            f"{result.data_path} generated at {result.generated_at.isoformat()}"
+        )
+        return
+
+    result = build_pages_site(
+        hours=args.hours,
+        min_edge=args.min_edge,
+        limit=args.limit,
+        output_dir=output_dir,
+    )
+    console.print(
+        "[green]Built static site:[/green] "
+        f"{result.index_path} and {result.data_path}"
+    )
+
+
 def cmd_odds(args: argparse.Namespace) -> None:
     """Fetch and display sportsbook fair values for matched sports pairs."""
     from arbscanner.matcher import load_cache
@@ -993,6 +1023,36 @@ def main() -> None:
         "--output", type=str, default=None, help="Output JSON path (default: docs/data.json)"
     )
 
+    site_parser = subparsers.add_parser(
+        "site", help="Build the static GitHub Pages site into docs/"
+    )
+    site_parser.add_argument(
+        "--hours", type=int, default=24, help="Lookback window in hours (default: 24)"
+    )
+    site_parser.add_argument(
+        "--min-edge", type=float, default=0.0, help="Min net edge filter"
+    )
+    site_parser.add_argument(
+        "--limit", type=int, default=100, help="Max opportunities to export"
+    )
+    site_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory (default: docs/)",
+    )
+    site_parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Validate an existing built site instead of rebuilding it",
+    )
+    site_parser.add_argument(
+        "--max-data-age-minutes",
+        type=int,
+        default=30,
+        help="Freshness threshold when using --verify-only (default: 30)",
+    )
+
     # odds command
     odds_parser = subparsers.add_parser(
         "odds", help="Fetch sportsbook fair values for sports pairs"
@@ -1050,6 +1110,7 @@ def main() -> None:
         "backtest": cmd_backtest,
         "execute": cmd_execute,
         "export": cmd_export,
+        "site": cmd_site,
         "odds": cmd_odds,
         "doctor": cmd_doctor,
     }
