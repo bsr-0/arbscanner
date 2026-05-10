@@ -95,10 +95,18 @@ def cmd_scan(args: argparse.Namespace) -> None:
             except Exception:
                 logger.debug("Auto re-match failed, continuing with existing pairs", exc_info=True)
 
-        opps = scan_all_pairs(
-            poly, kalshi, cache.pairs, threshold=threshold, max_workers=max_workers
-        )
-        log_opportunities(db_conn, opps)
+        once_mode = getattr(args, "once", False)
+        if once_mode:
+            opps = scan_all_pairs(
+                poly, kalshi, cache.pairs, threshold=threshold, max_workers=max_workers,
+                chunk_size=args.chunk_size,
+                on_opportunities=lambda batch: log_opportunities(db_conn, batch),
+            )
+        else:
+            opps = scan_all_pairs(
+                poly, kalshi, cache.pairs, threshold=threshold, max_workers=max_workers
+            )
+            log_opportunities(db_conn, opps)
         if alerts_enabled:
             send_alerts(opps)
         if paper_engine is not None:
@@ -777,6 +785,12 @@ def main() -> None:
         "--once",
         action="store_true",
         help="Run a single scan cycle and exit (no live dashboard; useful for CI/cron)",
+    )
+    scan_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=250,
+        help="Pairs per batch in --once mode; logs incrementally so partial results survive timeout (default: 250)",
     )
     scan_parser.add_argument(
         "--rematch-every",

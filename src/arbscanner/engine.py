@@ -211,18 +211,54 @@ def _fetch_all_books(
     return books
 
 
+def _scan_chunked(
+    poly_exchange,
+    kalshi_exchange,
+    pairs: list[MatchedPair],
+    threshold: float,
+    max_workers: int,
+    chunk_size: int,
+    on_opportunities,
+) -> list[ArbOpportunity]:
+    """Process pairs in chunks, calling on_opportunities after each batch."""
+    all_opps: list[ArbOpportunity] = []
+    total = len(pairs)
+    for i in range(0, total, chunk_size):
+        chunk = pairs[i : i + chunk_size]
+        logger.info(
+            "Scanning chunk %d-%d / %d", i + 1, min(i + chunk_size, total), total
+        )
+        chunk_opps = scan_all_pairs(
+            poly_exchange, kalshi_exchange, chunk,
+            threshold=threshold, max_workers=max_workers, chunk_size=0,
+        )
+        all_opps.extend(chunk_opps)
+        if on_opportunities and chunk_opps:
+            on_opportunities(chunk_opps)
+    return all_opps
+
+
 def scan_all_pairs(
     poly_exchange,
     kalshi_exchange,
     pairs: list[MatchedPair],
     threshold: float | None = None,
     max_workers: int | None = None,
+    chunk_size: int = 0,
+    on_opportunities=None,
 ) -> list[ArbOpportunity]:
     """Scan all matched pairs and return sorted arb opportunities.
 
     Fetches all order books in parallel using a ThreadPoolExecutor, then
     computes arbs locally from the pre-fetched books. Rate limiting is handled
     by the shared limiter in arbscanner.exchanges.
+
+    Args:
+        chunk_size: If > 0, process pairs in batches of this size and call
+            ``on_opportunities`` after each batch. Useful for CI where partial
+            results should be persisted before a timeout kills the process.
+        on_opportunities: Callback invoked with each batch of found opportunities
+            when ``chunk_size > 0``. Called as ``on_opportunities(opps)``.
 
     Returns opportunities with net_edge above threshold, sorted by expected_profit descending.
     """
@@ -233,6 +269,12 @@ def scan_all_pairs(
 
     if not pairs:
         return []
+
+    if chunk_size > 0:
+        return _scan_chunked(
+            poly_exchange, kalshi_exchange, pairs, threshold, max_workers,
+            chunk_size, on_opportunities,
+        )
 
     with timing_block(scan_cycle_seconds):
         # Phase 1: parallel fetch of all order books

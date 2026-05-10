@@ -42,7 +42,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RATE_LIMIT_PER_SEC: "50"
         run: |
-          uv run arbscanner scan --once --threshold 0.0 --max-workers 16
+          timeout 2400 uv run arbscanner scan --once --threshold 0.0 --max-workers 16 || true
           uv run arbscanner export --hours 24 --output docs/data.json
 
       - name: Commit and push data
