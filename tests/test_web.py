@@ -102,6 +102,8 @@ def test_get_opportunities_enriched_with_calibration():
             resp = client.get("/api/opportunities?hours=24&min_edge=0")
             data = resp.json()
             assert len(data) == 1
+            assert data[0]["poly_title"] == "Test Market"
+            assert data[0]["kalshi_title"] == "KX-TEST"
             cal = data[0]["calibration"]
             assert cal is not None
             assert cal["category"] == "politics"
@@ -127,6 +129,8 @@ def test_get_opportunities_calibration_none_for_unknown_pair():
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/opportunities?hours=24&min_edge=0")
         data = resp.json()
+        assert data[0]["poly_title"] == "Test Market"
+        assert data[0]["kalshi_title"] == ""
         assert data[0]["calibration"] is None
         conn.close()
 

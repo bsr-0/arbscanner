@@ -77,6 +77,19 @@ def _build_pair_index() -> dict[str, MatchedPair]:
     return {f"{p.poly_market_id}::{p.kalshi_market_id}": p for p in cache.pairs}
 
 
+def _titles_for_row(
+    pair_index: dict[str, MatchedPair],
+    poly_market_id: str,
+    kalshi_market_id: str,
+    market_title: str,
+) -> tuple[str, str]:
+    """Return display titles for each side of a logged opportunity row."""
+    pair = pair_index.get(f"{poly_market_id}::{kalshi_market_id}")
+    if pair is None:
+        return market_title, ""
+    return pair.poly_title or market_title, pair.kalshi_title
+
+
 def _calibration_for_row(
     pair_index: dict[str, MatchedPair],
     poly_market_id: str,
@@ -177,29 +190,34 @@ def get_opportunities(
         """
         rows = conn.execute(query, (min_edge, cutoff, limit)).fetchall()
 
-    pair_index = _build_pair_index() if tier == "pro" else {}
-    return [
-        {
-            "id": row[0],
-            "timestamp": row[1],
-            "poly_market_id": row[2],
-            "kalshi_market_id": row[3],
-            "market_title": row[4],
-            "direction": row[5],
-            "gross_edge": row[6],
-            "net_edge": row[7],
-            "available_size": row[8],
-            "expected_profit": row[9],
-            "poly_price": row[10],
-            "kalshi_price": row[11],
-            "calibration": (
-                _calibration_for_row(pair_index, row[2], row[3], row[7])
-                if tier == "pro"
-                else None
-            ),
-        }
-        for row in rows
-    ]
+    pair_index = _build_pair_index()
+    payload = []
+    for row in rows:
+        poly_title, kalshi_title = _titles_for_row(pair_index, row[2], row[3], row[4])
+        payload.append(
+            {
+                "id": row[0],
+                "timestamp": row[1],
+                "poly_market_id": row[2],
+                "kalshi_market_id": row[3],
+                "market_title": row[4],
+                "poly_title": poly_title,
+                "kalshi_title": kalshi_title,
+                "direction": row[5],
+                "gross_edge": row[6],
+                "net_edge": row[7],
+                "available_size": row[8],
+                "expected_profit": row[9],
+                "poly_price": row[10],
+                "kalshi_price": row[11],
+                "calibration": (
+                    _calibration_for_row(pair_index, row[2], row[3], row[7])
+                    if tier == "pro"
+                    else None
+                ),
+            }
+        )
+    return payload
 
 
 @app.get("/api/pairs")

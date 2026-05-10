@@ -48,8 +48,11 @@
         .edge-low { color: #8b949e; }
         .direction { font-size: 11px; padding: 2px 6px; border-radius: 3px; background: #1f2937; white-space: nowrap; }
         .market-title { max-width: 300px; }
-        .market-title a { color: #c9d1d9; text-decoration: none; }
-        .market-title a:hover { color: #58a6ff; text-decoration: underline; }
+        .market-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+        .market-row:last-child { margin-bottom: 0; }
+        .market-tag { color: #8b949e; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; min-width: 40px; }
+        .market-question { color: #c9d1d9; }
+        .market-fallback { color: #c9d1d9; }
         .market-links { display: flex; gap: 6px; margin-top: 4px; }
         .market-links a { font-size: 10px; color: #58a6ff; text-decoration: none; padding: 1px 5px; border: 1px solid #21262d; border-radius: 3px; background: #161b22; white-space: nowrap; }
         .market-links a:hover { background: #21262d; border-color: #58a6ff; }
@@ -215,11 +218,23 @@
         }
 
         function renderMarketCell(o) {
-            const title = escapeHtml(o.market_title.length > 50 ? o.market_title.slice(0, 47) + '...' : o.market_title);
+            const polyTitle = escapeHtml(o.poly_title || o.market_title || '');
+            const kalshiTitle = escapeHtml(o.kalshi_title || '');
+            const fallbackTitle = escapeHtml(o.market_title || '');
             const kalshiUrl = 'https://kalshi.com/markets/' + encodeURIComponent(o.kalshi_market_id);
             let links = `<a href="${kalshiUrl}" target="_blank" rel="noopener">Kalshi</a>`;
+            const titleHtml = kalshiTitle
+                ? `<div class="market-row">
+                        <span class="market-tag">Poly</span>
+                        <span class="market-question">${polyTitle}</span>
+                   </div>
+                   <div class="market-row">
+                        <span class="market-tag">Kalshi</span>
+                        <span class="market-question">${kalshiTitle}</span>
+                   </div>`
+                : `<div class="market-fallback">${fallbackTitle}</div>`;
             return `<td class="market-title">
-                <div>${title}</div>
+                ${titleHtml}
                 <div class="market-links">${links}</div>
             </td>`;
         }
