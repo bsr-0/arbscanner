@@ -388,37 +388,13 @@ def _validate_paper_args(args: argparse.Namespace) -> None:
 
 def _load_opportunity(opportunity_id: int):
     """Load a logged opportunity from the SQLite log as an ArbOpportunity."""
-    from datetime import datetime
-
-    from arbscanner.models import ArbOpportunity
+    from arbscanner.db import get_opportunity_by_id
 
     conn = get_connection()
     try:
-        row = conn.execute(
-            """SELECT timestamp, poly_market_id, kalshi_market_id, market_title,
-                      direction, gross_edge, net_edge, available_size,
-                      expected_profit, poly_price, kalshi_price
-               FROM opportunities WHERE id = ?""",
-            (opportunity_id,),
-        ).fetchone()
+        return get_opportunity_by_id(conn, opportunity_id)
     finally:
         conn.close()
-    if row is None:
-        return None
-    return ArbOpportunity(
-        poly_title=row[3],
-        kalshi_title=row[3],
-        poly_market_id=row[1],
-        kalshi_market_id=row[2],
-        direction=row[4],
-        poly_price=row[9],
-        kalshi_price=row[10],
-        gross_edge=row[5],
-        net_edge=row[6],
-        available_size=row[7],
-        expected_profit=row[8],
-        timestamp=datetime.fromisoformat(row[0]),
-    )
 
 
 def _print_paper_summary(engine) -> None:

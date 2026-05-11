@@ -8,6 +8,14 @@ Every candidate opportunity is scored against a historical calibration layer der
 
 ---
 
+## Docs
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design and module breakdown
+- [`docs/API.md`](docs/API.md) — HTTP API contract
+- [`docs/QUALITY_GATES.md`](docs/QUALITY_GATES.md) — measurable rollout gates for prediction snapshot / persistence work
+
+---
+
 ## Key features
 
 - **Automated market matching** across Polymarket and Kalshi using sentence-transformer embeddings + Anthropic Claude LLM confirmation for ambiguous pairs

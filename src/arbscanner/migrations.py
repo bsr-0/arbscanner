@@ -110,6 +110,24 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 """
 
+# Migration 4: persist scan-time snapshot fields on opportunities so newer
+# rows no longer depend on the mutable matched-pair cache for titles,
+# calibration context, or prediction metadata.
+_MIGRATION_4_SQL = """
+ALTER TABLE opportunities ADD COLUMN poly_title_snapshot TEXT;
+ALTER TABLE opportunities ADD COLUMN kalshi_title_snapshot TEXT;
+ALTER TABLE opportunities ADD COLUMN category_snapshot TEXT;
+ALTER TABLE opportunities ADD COLUMN resolution_date_snapshot TEXT;
+ALTER TABLE opportunities ADD COLUMN match_confidence REAL;
+ALTER TABLE opportunities ADD COLUMN match_source TEXT;
+ALTER TABLE opportunities ADD COLUMN prediction_yes REAL;
+ALTER TABLE opportunities ADD COLUMN prediction_yes_low REAL;
+ALTER TABLE opportunities ADD COLUMN prediction_yes_high REAL;
+ALTER TABLE opportunities ADD COLUMN prediction_source TEXT;
+ALTER TABLE opportunities ADD COLUMN prediction_origin TEXT;
+ALTER TABLE opportunities ADD COLUMN calibration_json TEXT;
+"""
+
 
 MIGRATIONS: list[Migration] = [
     Migration(
@@ -126,6 +144,11 @@ MIGRATIONS: list[Migration] = [
         version=3,
         description="Create schema_migrations tracking table",
         up_sql=_MIGRATION_3_SQL,
+    ),
+    Migration(
+        version=4,
+        description="Add opportunity snapshot fields for titles, predictions, and calibration",
+        up_sql=_MIGRATION_4_SQL,
     ),
 ]
 

@@ -83,4 +83,6 @@ class ArbOpportunity:
     # pair's category + resolution_date at scan time.
     category: str = ""
     resolution_date: str = ""  # ISO 8601, empty when unknown
+    match_confidence: float | None = None
+    match_source: str = ""
     calibration: dict | None = None  # CalibrationContext serialized as a dict

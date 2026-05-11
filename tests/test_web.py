@@ -57,6 +57,11 @@ def test_get_opportunities():
         assert len(data) == 1
         assert data[0]["market_title"] == "Test Market"
         assert data[0]["net_edge"] == 0.10
+        assert "prediction_yes" in data[0]
+        assert "prediction_yes_low" in data[0]
+        assert "prediction_yes_high" in data[0]
+        assert data[0]["prediction_source"] == "implied_band"
+        assert data[0]["prediction_origin"] in {"original", "derived"}
         # Calibration key is always present in the response payload, even when
         # the pair cache has no matching entry.
         assert "calibration" in data[0]
@@ -130,8 +135,78 @@ def test_get_opportunities_calibration_none_for_unknown_pair():
         resp = client.get("/api/opportunities?hours=24&min_edge=0")
         data = resp.json()
         assert data[0]["poly_title"] == "Test Market"
-        assert data[0]["kalshi_title"] == ""
+        assert data[0]["kalshi_title"] == "KX-TEST"
         assert data[0]["calibration"] is None
+        conn.close()
+
+
+def test_get_opportunities_prefers_persisted_snapshot_over_cache():
+    """New rows should serve persisted titles, predictions, and calibration."""
+    from arbscanner.models import MatchedPair, MatchedPairsCache
+
+    app = _get_test_app()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = get_connection(db_path)
+        log_opportunities(
+            conn,
+            [
+                _make_opp(
+                    poly_title="Snapshot Poly",
+                    kalshi_title="Snapshot Kalshi",
+                    category="politics",
+                    resolution_date="2026-07-01T00:00:00+00:00",
+                    match_confidence=0.94,
+                    match_source="embedding+llm",
+                    calibration={
+                        "category": "politics",
+                        "time_bucket": "30-90",
+                        "avg_mispricing": 5.0,
+                        "edge_likely_real": True,
+                        "confidence_note": "stored snapshot",
+                        "fair_value": {
+                            "implied_prob": 0.63,
+                            "source": "odds_api",
+                            "num_bookmakers": 5,
+                            "spread": 0.03,
+                        },
+                    },
+                )
+            ],
+        )
+        app.state.db = conn
+        app.state.start_time = 0
+
+        wrong_cache = MatchedPairsCache(
+            pairs=[
+                MatchedPair(
+                    poly_market_id="poly_1",
+                    poly_title="Wrong Poly",
+                    kalshi_market_id="kalshi_1",
+                    kalshi_title="Wrong Kalshi",
+                    confidence=0.11,
+                    source="manual",
+                    matched_at="2026-04-10T00:00:00Z",
+                    category="entertainment",
+                    resolution_date="2026-12-01T00:00:00+00:00",
+                )
+            ],
+        )
+
+        with patch("arbscanner.web.load_cache", return_value=wrong_cache):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/opportunities?hours=24&min_edge=0")
+            data = resp.json()
+            assert data[0]["poly_title"] == "Snapshot Poly"
+            assert data[0]["kalshi_title"] == "Snapshot Kalshi"
+            assert data[0]["match_confidence"] == 0.94
+            assert data[0]["match_source"] == "embedding+llm"
+            assert data[0]["prediction_yes"] == 0.63
+            assert data[0]["prediction_source"] == "odds_api"
+            assert data[0]["prediction_origin"] == "original"
+            assert data[0]["calibration"]["confidence_note"] == "stored snapshot"
+
         conn.close()
 
 
@@ -521,7 +596,9 @@ def test_dashboard_page():
     # Calibration column + badge renderer must be wired into the row JS so
     # the moat is visible next to every opportunity.
     assert "<th>Calibration</th>" in resp.text
+    assert "<th>Prediction</th>" in resp.text
     assert "renderCalibrationBadge" in resp.text
+    assert "renderPrediction" in resp.text
     assert "calib-badge" in resp.text
 
     app.state.db.close()

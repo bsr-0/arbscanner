@@ -125,6 +125,8 @@ def calculate_arb(
                         timestamp=now,
                         category=pair.category,
                         resolution_date=pair.resolution_date,
+                        match_confidence=pair.confidence,
+                        match_source=pair.source,
                         calibration=_calibration_for(pair, net, fair_value),
                     )
                 )
@@ -159,6 +161,8 @@ def calculate_arb(
                         timestamp=now,
                         category=pair.category,
                         resolution_date=pair.resolution_date,
+                        match_confidence=pair.confidence,
+                        match_source=pair.source,
                         calibration=_calibration_for(pair, net, fair_value),
                     )
                 )

@@ -1,5 +1,6 @@
 """FastAPI web backend for arbscanner dashboard."""
 
+import json
 import logging
 import sqlite3
 import time
@@ -70,8 +71,8 @@ def _get_tier(request: Request) -> str:
 def _build_pair_index() -> dict[str, MatchedPair]:
     """Return a {poly_id::kalshi_id -> MatchedPair} index of the current cache.
 
-    This is the join key used to attach per-opportunity calibration context
-    from the JSON pair cache without touching the SQLite opportunities schema.
+    This is now only a fallback for legacy opportunity rows that predate the
+    persisted snapshot fields in SQLite.
     """
     cache = load_cache()
     return {f"{p.poly_market_id}::{p.kalshi_market_id}": p for p in cache.pairs}
@@ -82,12 +83,48 @@ def _titles_for_row(
     poly_market_id: str,
     kalshi_market_id: str,
     market_title: str,
+    poly_title_snapshot: str | None,
+    kalshi_title_snapshot: str | None,
 ) -> tuple[str, str]:
     """Return display titles for each side of a logged opportunity row."""
+    if poly_title_snapshot or kalshi_title_snapshot:
+        return poly_title_snapshot or market_title, kalshi_title_snapshot or ""
     pair = pair_index.get(f"{poly_market_id}::{kalshi_market_id}")
     if pair is None:
         return market_title, ""
     return pair.poly_title or market_title, pair.kalshi_title
+
+
+def _parse_calibration_json(raw: str | None) -> dict | None:
+    """Deserialize a stored calibration snapshot, if any."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _prediction_from_prices(direction: str, poly_price: float, kalshi_price: float) -> dict:
+    """Derive a legacy prediction band from raw market prices."""
+    if direction == "poly_yes_kalshi_no":
+        low = poly_price
+        high = 1.0 - kalshi_price
+    else:
+        low = kalshi_price
+        high = 1.0 - poly_price
+    low = max(0.0, min(1.0, low))
+    high = max(0.0, min(1.0, high))
+    if low > high:
+        low, high = high, low
+    return {
+        "prediction_yes": (low + high) / 2.0,
+        "prediction_yes_low": low,
+        "prediction_yes_high": high,
+        "prediction_source": "implied_band",
+        "prediction_origin": "derived",
+    }
 
 
 def _calibration_for_row(
@@ -95,12 +132,46 @@ def _calibration_for_row(
     poly_market_id: str,
     kalshi_market_id: str,
     net_edge: float,
+    calibration_json: str | None,
+    category_snapshot: str | None,
+    resolution_date_snapshot: str | None,
 ) -> dict | None:
     """Look up calibration context for a logged opportunity row.
 
     Returns ``None`` when no matching pair is known or the pair lacks
     calibration metadata.
     """
+    stored = _parse_calibration_json(calibration_json)
+    if stored is not None:
+        return stored
+
+    if category_snapshot or resolution_date_snapshot:
+        resolution_date = None
+        if resolution_date_snapshot:
+            try:
+                resolution_date = datetime.fromisoformat(
+                    resolution_date_snapshot.replace("Z", "+00:00")
+                )
+            except ValueError:
+                resolution_date = None
+        try:
+            ctx = get_calibration_context(category_snapshot or None, resolution_date, net_edge)
+        except Exception:
+            logger.debug(
+                "Calibration lookup failed for stored snapshot %s/%s",
+                poly_market_id,
+                kalshi_market_id,
+            )
+            return None
+        return {
+            "category": ctx.category,
+            "days_to_resolution": ctx.days_to_resolution,
+            "time_bucket": ctx.time_bucket,
+            "avg_mispricing": ctx.avg_mispricing,
+            "edge_likely_real": ctx.edge_likely_real,
+            "confidence_note": ctx.confidence_note,
+        }
+
     pair = pair_index.get(f"{poly_market_id}::{kalshi_market_id}")
     if pair is None or (not pair.category and not pair.resolution_date):
         return None
@@ -166,7 +237,12 @@ def get_opportunities(
         query = """
             SELECT id, timestamp, poly_market_id, kalshi_market_id, market_title,
                    direction, gross_edge, net_edge, available_size,
-                   expected_profit, poly_price, kalshi_price
+                   expected_profit, poly_price, kalshi_price,
+                   poly_title_snapshot, kalshi_title_snapshot,
+                   category_snapshot, resolution_date_snapshot,
+                   match_confidence, match_source,
+                   prediction_yes, prediction_yes_low, prediction_yes_high,
+                   prediction_source, prediction_origin, calibration_json
             FROM opportunities
             WHERE net_edge >= ?
               AND timestamp >= ?
@@ -181,7 +257,12 @@ def get_opportunities(
         query = """
             SELECT id, timestamp, poly_market_id, kalshi_market_id, market_title,
                    direction, gross_edge, net_edge, available_size,
-                   expected_profit, poly_price, kalshi_price
+                   expected_profit, poly_price, kalshi_price,
+                   poly_title_snapshot, kalshi_title_snapshot,
+                   category_snapshot, resolution_date_snapshot,
+                   match_confidence, match_source,
+                   prediction_yes, prediction_yes_low, prediction_yes_high,
+                   prediction_source, prediction_origin, calibration_json
             FROM opportunities
             WHERE net_edge >= ?
               AND timestamp >= ?
@@ -193,25 +274,62 @@ def get_opportunities(
     pair_index = _build_pair_index()
     payload = []
     for row in rows:
-        poly_title, kalshi_title = _titles_for_row(pair_index, row[2], row[3], row[4])
+        poly_title, kalshi_title = _titles_for_row(
+            pair_index,
+            row["poly_market_id"],
+            row["kalshi_market_id"],
+            row["market_title"],
+            row["poly_title_snapshot"],
+            row["kalshi_title_snapshot"],
+        )
+        prediction = _prediction_from_prices(
+            row["direction"], row["poly_price"], row["kalshi_price"]
+        )
+        if row["prediction_yes"] is not None:
+            prediction = {
+                "prediction_yes": row["prediction_yes"],
+                "prediction_yes_low": (
+                    row["prediction_yes_low"]
+                    if row["prediction_yes_low"] is not None
+                    else prediction["prediction_yes_low"]
+                ),
+                "prediction_yes_high": (
+                    row["prediction_yes_high"]
+                    if row["prediction_yes_high"] is not None
+                    else prediction["prediction_yes_high"]
+                ),
+                "prediction_source": row["prediction_source"] or prediction["prediction_source"],
+                "prediction_origin": row["prediction_origin"] or "original",
+            }
         payload.append(
             {
-                "id": row[0],
-                "timestamp": row[1],
-                "poly_market_id": row[2],
-                "kalshi_market_id": row[3],
-                "market_title": row[4],
+                "id": row["id"],
+                "timestamp": row["timestamp"],
+                "poly_market_id": row["poly_market_id"],
+                "kalshi_market_id": row["kalshi_market_id"],
+                "market_title": row["market_title"],
                 "poly_title": poly_title,
                 "kalshi_title": kalshi_title,
-                "direction": row[5],
-                "gross_edge": row[6],
-                "net_edge": row[7],
-                "available_size": row[8],
-                "expected_profit": row[9],
-                "poly_price": row[10],
-                "kalshi_price": row[11],
+                "direction": row["direction"],
+                "gross_edge": row["gross_edge"],
+                "net_edge": row["net_edge"],
+                "available_size": row["available_size"],
+                "expected_profit": row["expected_profit"],
+                "poly_price": row["poly_price"],
+                "kalshi_price": row["kalshi_price"],
+                "match_confidence": row["match_confidence"],
+                "match_source": row["match_source"],
+                **prediction,
                 "calibration": (
-                    _calibration_for_row(pair_index, row[2], row[3], row[7])
+                    _calibration_for_row(
+                        pair_index,
+                        row["poly_market_id"],
+                        row["kalshi_market_id"],
+                        row["net_edge"],
+                        row["calibration_json"],
+                        row["category_snapshot"],
+                        row["resolution_date_snapshot"],
+                    )
                     if tier == "pro"
                     else None
                 ),

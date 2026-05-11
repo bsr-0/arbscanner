@@ -56,9 +56,8 @@
         .market-links { display: flex; gap: 6px; margin-top: 4px; }
         .market-links a { font-size: 10px; color: #58a6ff; text-decoration: none; padding: 1px 5px; border: 1px solid #21262d; border-radius: 3px; background: #161b22; white-space: nowrap; }
         .market-links a:hover { background: #21262d; border-color: #58a6ff; }
-        .calibration { font-size: 11px; color: #8b949e; margin-top: 4px; }
-        .calibration.real { color: #3fb950; }
-        .calibration.noise { color: #d29922; }
+        .prediction-main { font-family: monospace; font-weight: 700; color: #c9d1d9; white-space: nowrap; }
+        .prediction-sub { font-size: 10px; color: #8b949e; margin-top: 2px; white-space: nowrap; }
         .calib-badge { display: inline-block; font-size: 10px; padding: 2px 6px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; white-space: nowrap; cursor: help; }
         .calib-badge.real { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.4); }
         .calib-badge.noise { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.4); }
@@ -176,6 +175,7 @@
                     <th>Net Edge</th>
                     <th>Size</th>
                     <th>$ Profit</th>
+                    <th>Prediction</th>
                     <th>Calibration</th>
                     <th>Time</th>
                 </tr>
@@ -259,6 +259,49 @@
                 html += ` <span class="calib-badge" style="background:rgba(88,166,255,0.15);color:#58a6ff;border:1px solid rgba(88,166,255,0.4);" title="${escapeHtml(tip)}">FV ${prob}%</span>`;
             }
             return html;
+        }
+
+        function predictionBand(o) {
+            let low = 0;
+            let high = 1;
+            if (o.direction === 'poly_yes_kalshi_no') {
+                low = o.poly_price;
+                high = 1 - o.kalshi_price;
+            } else {
+                low = o.kalshi_price;
+                high = 1 - o.poly_price;
+            }
+            low = Math.max(0, Math.min(1, low));
+            high = Math.max(0, Math.min(1, high));
+            if (low > high) {
+                const tmp = low;
+                low = high;
+                high = tmp;
+            }
+            return {
+                low,
+                high,
+                midpoint: (low + high) / 2
+            };
+        }
+
+        function renderPrediction(o) {
+            const derived = predictionBand(o);
+            const lowValue = typeof o.prediction_yes_low === 'number' ? o.prediction_yes_low : derived.low;
+            const highValue = typeof o.prediction_yes_high === 'number' ? o.prediction_yes_high : derived.high;
+            const pointValue = typeof o.prediction_yes === 'number' ? o.prediction_yes : derived.midpoint;
+            const low = (lowValue * 100).toFixed(1);
+            const high = (highValue * 100).toFixed(1);
+            const point = (pointValue * 100).toFixed(1);
+            const source = o.prediction_source || 'implied_band';
+            const origin = o.prediction_origin || 'derived';
+            const main = `YES ${point}%`;
+            const tooltip = `Prediction source: ${source}. Origin: ${origin}. YES probability band: ${low}% to ${high}%.`;
+
+            return `<td title="${escapeHtml(tooltip)}">
+                <div class="prediction-main">${escapeHtml(main)}</div>
+                <div class="prediction-sub">${low}%-${high}% band</div>
+            </td>`;
         }
 
         function formatTime(ts) {
@@ -360,6 +403,7 @@
                         <td class="${edgeClass(o.net_edge)}">${(o.net_edge * 100).toFixed(1)}%</td>
                         <td>${o.available_size.toFixed(0)}</td>
                         <td class="${edgeClass(o.net_edge)}">$${o.expected_profit.toFixed(2)}</td>
+                        ${renderPrediction(o)}
                         <td>${renderCalibrationBadge(o.calibration)}</td>
                         <td class="dim">${formatTime(o.timestamp)}</td>
                     </tr>
