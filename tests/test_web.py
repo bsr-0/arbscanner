@@ -912,18 +912,20 @@ def test_stripe_checkout_uses_absolute_public_url(monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"checkout_url": "https://checkout.stripe.com/fake_session_url"}
 
-    # Stripe-side: both redirects must be absolute and prefixed with the
-    # configured public URL.
-    assert captured["success_url"] == "https://arbscanner.example.com/?payment=success"
+    # Stripe-side: success redirects to /welcome?key=<api_key>, cancel stays
+    # on the root.  The key is embedded in metadata so the webhook can persist it.
+    assert captured["success_url"].startswith("https://arbscanner.example.com/welcome?key=")
     assert captured["cancel_url"] == "https://arbscanner.example.com/?payment=cancelled"
     assert captured["mode"] == "subscription"
     assert captured["line_items"] == [{"price": "price_xxx", "quantity": 1}]
+    assert "api_key" in captured["metadata"]
+    assert len(captured["metadata"]["api_key"]) > 20
 
     app.state.db.close()
 
 
 def test_stripe_checkout_strips_trailing_slash_from_public_url(monkeypatch):
-    """``ARBSCANNER_PUBLIC_URL=https://x.com/`` must not produce `//?payment=...`."""
+    """``ARBSCANNER_PUBLIC_URL=https://x.com/`` must not produce double-slash URLs."""
     from arbscanner.config import settings
 
     monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_xxx")
@@ -950,7 +952,8 @@ def test_stripe_checkout_strips_trailing_slash_from_public_url(monkeypatch):
     client = TestClient(app, raise_server_exceptions=False)
     client.get("/api/stripe/checkout")
 
-    assert captured["success_url"] == "https://arbscanner.example.com/?payment=success"
+    assert captured["success_url"].startswith("https://arbscanner.example.com/welcome?key=")
+    assert "//" not in captured["success_url"].replace("https://", "")
     assert captured["cancel_url"] == "https://arbscanner.example.com/?payment=cancelled"
 
     app.state.db.close()
@@ -1002,7 +1005,7 @@ def test_stripe_webhook_rejects_bad_signature(monkeypatch):
 
 
 def test_stripe_webhook_accepts_valid_event(monkeypatch):
-    """Valid signature → 200 and the event type dispatch runs."""
+    """Valid signature with no api_key metadata → 200 (graceful no-op)."""
     from arbscanner.config import settings
     import stripe
 
@@ -1011,21 +1014,177 @@ def test_stripe_webhook_accepts_valid_event(monkeypatch):
 
     fake_event = {
         "type": "checkout.session.completed",
-        "data": {"object": {"customer_email": "ben@example.com"}},
+        "data": {"object": {"customer_email": "ben@example.com", "metadata": {}}},
     }
     monkeypatch.setattr(stripe.Webhook, "construct_event", lambda *a, **kw: fake_event)
 
     app = _get_test_app()
-    app.state.db = sqlite3.connect(":memory:")
-    app.state.start_time = 0
+    from arbscanner.db import get_connection
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app.state.db = get_connection(Path(tmpdir) / "test.db")
+        app.state.start_time = 0
 
-    client = TestClient(app, raise_server_exceptions=False)
-    resp = client.post(
-        "/api/stripe/webhook",
-        content=b'{"type":"checkout.session.completed"}',
-        headers={"stripe-signature": "t=0,v1=valid"},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/stripe/webhook",
+            content=b'{"type":"checkout.session.completed"}',
+            headers={"stripe-signature": "t=0,v1=valid"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
 
-    app.state.db.close()
+        app.state.db.close()
+
+
+def test_stripe_webhook_persists_subscription_on_checkout_completed(monkeypatch):
+    """checkout.session.completed with api_key metadata → row written to subscriptions."""
+    from arbscanner.config import settings
+    from arbscanner.db import get_connection, get_tier_by_api_key
+    import stripe
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_xxx")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "whsec_xxx")
+
+    api_key = "test-key-abc123"
+    fake_event = {
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "customer_email": "subscriber@example.com",
+                "customer": "cus_123",
+                "subscription": "sub_456",
+                "metadata": {"api_key": api_key},
+            }
+        },
+    }
+    monkeypatch.setattr(stripe.Webhook, "construct_event", lambda *a, **kw: fake_event)
+
+    app = _get_test_app()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = get_connection(Path(tmpdir) / "test.db")
+        app.state.db = conn
+        app.state.start_time = 0
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/stripe/webhook",
+            content=b"{}",
+            headers={"stripe-signature": "t=0,v1=valid"},
+        )
+        assert resp.status_code == 200
+
+        # The API key should now map to 'pro' in the DB.
+        assert get_tier_by_api_key(conn, api_key) == "pro"
+        assert get_tier_by_api_key(conn, "unknown-key") == "free"
+
+        conn.close()
+
+
+def test_stripe_webhook_cancels_subscription_on_deletion(monkeypatch):
+    """customer.subscription.deleted → subscription row marked cancelled."""
+    from arbscanner.config import settings
+    from arbscanner.db import get_connection, get_tier_by_api_key, upsert_subscription
+    import stripe
+
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_xxx")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "whsec_xxx")
+
+    api_key = "cancel-test-key"
+    sub_id = "sub_to_cancel"
+
+    fake_event = {
+        "type": "customer.subscription.deleted",
+        "data": {"object": {"id": sub_id}},
+    }
+    monkeypatch.setattr(stripe.Webhook, "construct_event", lambda *a, **kw: fake_event)
+
+    app = _get_test_app()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = get_connection(Path(tmpdir) / "test.db")
+        upsert_subscription(conn, api_key, "x@example.com", "cus_x", sub_id)
+        assert get_tier_by_api_key(conn, api_key) == "pro"
+
+        app.state.db = conn
+        app.state.start_time = 0
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/stripe/webhook",
+            content=b"{}",
+            headers={"stripe-signature": "t=0,v1=valid"},
+        )
+        assert resp.status_code == 200
+        assert get_tier_by_api_key(conn, api_key) == "free"
+
+        conn.close()
+
+
+def test_api_key_header_grants_pro_tier(monkeypatch):
+    """X-Api-Key header with a valid Pro key bypasses free-tier limits."""
+    from arbscanner.config import settings
+    from arbscanner.db import get_connection, upsert_subscription
+
+    app = _get_test_app()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = get_connection(Path(tmpdir) / "test.db")
+        api_key = "my-pro-key"
+        upsert_subscription(conn, api_key, "user@example.com", "cus_y", "sub_y")
+
+        # Opportunities must be older than the 5-min free-tier delay to appear
+        # in free-tier responses; use a timestamp 10 minutes in the past.
+        old_ts = datetime.now(timezone.utc) - timedelta(minutes=10)
+        log_opportunities(conn, [_make_opp(timestamp=old_ts) for _ in range(5)])
+
+        app.state.db = conn
+        app.state.start_time = 0
+
+        monkeypatch.setattr(settings, "tier", "free")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # Free tier (no key) → capped to FREE_MAX_OPPORTUNITIES (3)
+        resp_free = client.get("/api/opportunities?hours=24&min_edge=0")
+        assert len(resp_free.json()) == 3
+
+        # Pro key → full table (5)
+        resp_pro = client.get(
+            "/api/opportunities?hours=24&min_edge=0",
+            headers={"x-api-key": api_key},
+        )
+        assert len(resp_pro.json()) == 5
+
+        conn.close()
+
+
+def test_welcome_page_renders_api_key():
+    """GET /welcome?key=xxx renders the key in the page body."""
+    app = _get_test_app()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app.state.db = get_connection(Path(tmpdir) / "test.db")
+        app.state.start_time = 0
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/welcome?key=my-super-secret-key")
+
+        assert resp.status_code == 200
+        assert "my-super-secret-key" in resp.text
+        assert "Pro API Key" in resp.text
+
+        app.state.db.close()
+
+
+def test_welcome_page_without_key():
+    """GET /welcome with no key renders gracefully without crashing."""
+    app = _get_test_app()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app.state.db = get_connection(Path(tmpdir) / "test.db")
+        app.state.start_time = 0
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/welcome")
+
+        assert resp.status_code == 200
+        assert "Welcome to ArbScanner Pro" in resp.text
+        # No key in URL → show the fallback message
+        assert "No key found" in resp.text
+
+        app.state.db.close()

@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from arbscanner.config import DB_PATH
@@ -138,6 +138,60 @@ def get_opportunity_by_id(
         match_source=row["match_source"] or "",
         calibration=_deserialize_calibration(row["calibration_json"]),
     )
+
+
+def upsert_subscription(
+    conn: sqlite3.Connection,
+    api_key: str,
+    customer_email: str | None,
+    stripe_customer_id: str | None,
+    stripe_subscription_id: str | None,
+) -> None:
+    """Insert or update a Pro subscription keyed by api_key.
+
+    Called when Stripe fires ``checkout.session.completed``.  If the same
+    api_key appears again (e.g. a retried webhook), the row is updated in
+    place and ``cancelled_at`` is cleared so a reactivated subscription works.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+            (api_key, customer_email, stripe_customer_id, stripe_subscription_id,
+             tier, created_at, cancelled_at)
+        VALUES (?, ?, ?, ?, 'pro', ?, NULL)
+        ON CONFLICT(api_key) DO UPDATE SET
+            customer_email        = excluded.customer_email,
+            stripe_customer_id    = excluded.stripe_customer_id,
+            stripe_subscription_id = excluded.stripe_subscription_id,
+            tier                  = 'pro',
+            cancelled_at          = NULL
+        """,
+        (api_key, customer_email, stripe_customer_id, stripe_subscription_id, now),
+    )
+    conn.commit()
+
+
+def get_tier_by_api_key(conn: sqlite3.Connection, api_key: str) -> str:
+    """Return 'pro' if the key belongs to an active subscription, else 'free'."""
+    row = conn.execute(
+        "SELECT tier, cancelled_at FROM subscriptions WHERE api_key = ?",
+        (api_key,),
+    ).fetchone()
+    if row is None:
+        return "free"
+    tier, cancelled_at = row["tier"], row["cancelled_at"]
+    return "free" if cancelled_at else tier
+
+
+def cancel_subscription_by_stripe_id(conn: sqlite3.Connection, stripe_subscription_id: str) -> None:
+    """Mark a subscription as cancelled when Stripe fires ``customer.subscription.deleted``."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE subscriptions SET tier = 'free', cancelled_at = ? WHERE stripe_subscription_id = ?",
+        (now, stripe_subscription_id),
+    )
+    conn.commit()
 
 
 def log_opportunities(conn: sqlite3.Connection, opportunities: list[ArbOpportunity]) -> None:

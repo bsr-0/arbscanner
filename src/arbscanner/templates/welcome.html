@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to ArbScanner Pro</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; }
+
+        nav.top-nav { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-bottom: 1px solid #21262d; }
+        nav.top-nav .brand { font-size: 16px; font-weight: 700; color: #58a6ff; text-decoration: none; }
+        nav.top-nav .links { display: flex; gap: 20px; }
+        nav.top-nav .links a { color: #8b949e; text-decoration: none; font-size: 13px; font-weight: 500; }
+        nav.top-nav .links a:hover { color: #58a6ff; }
+
+        .container { max-width: 680px; margin: 64px auto; padding: 0 24px; }
+        .badge { display: inline-block; background: #238636; color: #fff; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px; margin-bottom: 20px; }
+        h1 { font-size: 32px; font-weight: 800; color: #fff; margin-bottom: 12px; }
+        .subtitle { font-size: 16px; color: #8b949e; margin-bottom: 40px; }
+
+        .key-card { background: #161b22; border: 1px solid #3fb950; border-radius: 8px; padding: 24px; margin-bottom: 32px; }
+        .key-card h2 { font-size: 14px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; margin-bottom: 12px; }
+        .key-value { display: flex; align-items: center; gap: 12px; }
+        .key-value code { flex: 1; font-family: 'SF Mono', 'Consolas', monospace; font-size: 14px; background: #0d1117; padding: 10px 14px; border-radius: 6px; border: 1px solid #21262d; color: #3fb950; word-break: break-all; }
+        .copy-btn { padding: 8px 16px; background: #21262d; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+        .copy-btn:hover { background: #30363d; }
+        .copy-btn.copied { background: #238636; border-color: #3fb950; color: #fff; }
+
+        .warning { background: #1c1a00; border: 1px solid #9e6a03; border-radius: 6px; padding: 12px 16px; font-size: 13px; color: #d29922; margin-top: 12px; }
+        .warning strong { color: #e3b341; }
+
+        .steps { margin-bottom: 40px; }
+        .steps h2 { font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 16px; }
+        .step { display: flex; gap: 16px; margin-bottom: 20px; align-items: flex-start; }
+        .step-num { background: #58a6ff; color: #0d1117; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+        .step div h4 { color: #fff; margin-bottom: 4px; font-size: 15px; }
+        .step div p { font-size: 13px; color: #8b949e; margin: 0; }
+        .step div code { font-family: 'SF Mono', 'Consolas', monospace; background: #161b22; padding: 2px 6px; border-radius: 4px; font-size: 12px; color: #79c0ff; }
+
+        .cta-row { display: flex; gap: 12px; }
+        .btn { display: inline-block; padding: 10px 24px; border-radius: 6px; font-size: 14px; font-weight: 600; text-decoration: none; }
+        .btn-primary { background: #238636; color: #fff; }
+        .btn-primary:hover { background: #2ea043; }
+        .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+        .btn-secondary:hover { background: #30363d; }
+
+        .footer { text-align: center; padding: 40px 24px; color: #484f58; font-size: 13px; border-top: 1px solid #21262d; margin-top: 80px; }
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <a href="/" class="brand">ArbScanner</a>
+        <div class="links">
+            <a href="/dashboard">Dashboard</a>
+            <a href="/backtest">Backtest</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="badge">Payment successful</div>
+        <h1>Welcome to ArbScanner Pro</h1>
+        <p class="subtitle">Your subscription is active. Copy your API key below — you'll need it to access Pro features.</p>
+
+        {% if api_key %}
+        <div class="key-card">
+            <h2>Your Pro API Key</h2>
+            <div class="key-value">
+                <code id="api-key">{{ api_key }}</code>
+                <button class="copy-btn" id="copy-btn" onclick="copyKey()">Copy</button>
+            </div>
+            <div class="warning">
+                <strong>Save this key now.</strong> It won't be shown again. Treat it like a password — anyone with it gets Pro access.
+            </div>
+        </div>
+        {% else %}
+        <div class="key-card">
+            <h2>API Key</h2>
+            <p style="color: #8b949e; font-size: 14px;">No key found in this URL. If you just paid, check your email or contact support.</p>
+        </div>
+        {% endif %}
+
+        <div class="steps">
+            <h2>Getting started</h2>
+
+            <div class="step">
+                <div class="step-num">1</div>
+                <div>
+                    <h4>Access the Pro dashboard</h4>
+                    <p>Open the <a href="/dashboard" style="color:#58a6ff;">live dashboard</a> and add your key to requests using the <code>X-Api-Key</code> header, or browse directly — the dashboard auto-detects it.</p>
+                </div>
+            </div>
+
+            <div class="step">
+                <div class="step-num">2</div>
+                <div>
+                    <h4>Set up alerts</h4>
+                    <p>Add <code>TELEGRAM_BOT_TOKEN</code> and <code>TELEGRAM_CHAT_ID</code> (or <code>DISCORD_WEBHOOK_URL</code>) to your instance's <code>.env</code> to receive push alerts when edge exceeds your threshold.</p>
+                </div>
+            </div>
+
+            <div class="step">
+                <div class="step-num">3</div>
+                <div>
+                    <h4>Authenticate API calls</h4>
+                    <p>Pass your key as <code>X-Api-Key: {{ api_key or "your-key-here" }}</code> on any <code>/api/*</code> request to unlock real-time data and calibration context.</p>
+                </div>
+            </div>
+
+            <div class="step">
+                <div class="step-num">4</div>
+                <div>
+                    <h4>Run the scanner locally (optional)</h4>
+                    <p>Clone the repo, fill in <code>.env</code>, and run <code>arbscanner scan</code> for a full terminal dashboard with live execution support.</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="cta-row">
+            <a href="/dashboard" class="btn btn-primary">Open Dashboard</a>
+            <a href="/" class="btn btn-secondary">Back to Home</a>
+        </div>
+    </div>
+
+    <div class="footer">
+        ArbScanner &copy; 2026. Questions? Open an issue on GitHub.
+    </div>
+
+    <script>
+        function copyKey() {
+            const key = document.getElementById('api-key')?.textContent?.trim();
+            if (!key) return;
+            navigator.clipboard.writeText(key).then(() => {
+                const btn = document.getElementById('copy-btn');
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = 'Copy';
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
+        }
+    </script>
+</body>
+</html>

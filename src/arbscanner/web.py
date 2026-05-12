@@ -2,6 +2,7 @@
 
 import json
 import logging
+import secrets
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -22,7 +23,13 @@ from arbscanner.config import (
     TEMPLATES_DIR,
     settings,
 )
-from arbscanner.db import get_connection, get_opportunity_by_id
+from arbscanner.db import (
+    cancel_subscription_by_stripe_id,
+    get_connection,
+    get_opportunity_by_id,
+    get_tier_by_api_key,
+    upsert_subscription,
+)
 from arbscanner.health import router as health_router
 from arbscanner.matcher import load_cache
 from arbscanner.metrics import MetricsRegistry
@@ -57,12 +64,25 @@ app.include_router(health_router)
 def _get_tier(request: Request) -> str:
     """Return the requesting tier: 'free' or 'pro'.
 
-    The `X-Arbscanner-Tier` header wins so tests and demo deployments can
-    override the global default without restarting the server. Otherwise we
-    fall back to the `ARBSCANNER_TIER` env var (stored on `settings.tier`).
-    Any value other than ``"free"`` is treated as ``"pro"`` so a typo never
-    accidentally locks out a paying user.
+    Resolution order:
+    1. ``X-Api-Key`` header — looked up in the ``subscriptions`` DB table.
+       A valid active key returns the stored tier; an unknown key falls
+       through to the next check (never 403s, just doesn't grant Pro).
+    2. ``X-Arbscanner-Tier`` header — lets tests and demo deployments
+       override the process-wide default without restarting the server.
+    3. ``ARBSCANNER_TIER`` env var (``settings.tier``).
+
+    Any value other than ``"free"`` is treated as ``"pro"`` so a typo
+    never accidentally locks out a paying user.
     """
+    api_key = request.headers.get("x-api-key", "").strip()
+    if api_key:
+        conn = getattr(request.app.state, "db", None)
+        if conn is not None:
+            db_tier = get_tier_by_api_key(conn, api_key)
+            if db_tier == "pro":
+                return "pro"
+
     header = request.headers.get("x-arbscanner-tier", "").strip().lower()
     raw = header or settings.tier
     return "free" if raw == "free" else "pro"
@@ -614,21 +634,49 @@ async def stripe_webhook(request: Request):
     except (ValueError, stripe.SignatureVerificationError):
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
+    conn = getattr(request.app.state, "db", None)
+
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        logger.info("Checkout completed: customer=%s", session.get("customer_email"))
+        api_key = (session.get("metadata") or {}).get("api_key")
+        customer_email = session.get("customer_email") or (
+            (session.get("customer_details") or {}).get("email")
+        )
+        if api_key and conn is not None:
+            upsert_subscription(
+                conn,
+                api_key=api_key,
+                customer_email=customer_email,
+                stripe_customer_id=session.get("customer"),
+                stripe_subscription_id=session.get("subscription"),
+            )
+        logger.info(
+            "Checkout completed: customer=%s api_key_issued=%s",
+            customer_email,
+            bool(api_key),
+        )
     elif event["type"] == "customer.subscription.deleted":
         sub = event["data"]["object"]
+        if conn is not None:
+            cancel_subscription_by_stripe_id(conn, sub["id"])
         logger.info("Subscription cancelled: %s", sub.get("id"))
 
     return {"status": "ok"}
 
 
 @app.get("/api/stripe/checkout")
-def create_checkout_session():
-    """Create a Stripe Checkout session for the paid plan."""
+def create_checkout_session(request: Request):
+    """Create a Stripe Checkout session for the paid plan.
+
+    Generates a unique API key and embeds it in the Stripe session metadata so
+    the webhook can persist the subscription when payment completes.  The
+    success URL redirects to ``/welcome?key=<api_key>`` where the subscriber
+    can copy their key.
+    """
     if not settings.stripe_secret_key or not settings.stripe_price_id:
         raise HTTPException(status_code=503, detail="Stripe not configured")
+
+    api_key = secrets.token_urlsafe(32)
 
     # Stripe rejects Session creation if success_url / cancel_url aren't
     # absolute URLs. Build them off the configured public base so the
@@ -637,7 +685,8 @@ def create_checkout_session():
     session = stripe.checkout.Session.create(
         mode="subscription",
         line_items=[{"price": settings.stripe_price_id, "quantity": 1}],
-        success_url=f"{base}/?payment=success",
+        metadata={"api_key": api_key},
+        success_url=f"{base}/welcome?key={api_key}",
         cancel_url=f"{base}/?payment=cancelled",
     )
     return {"checkout_url": session.url}
@@ -672,3 +721,18 @@ def dashboard_page(request: Request):
 def backtest_page(request: Request):
     """Backtest + paper trading performance page."""
     return templates.TemplateResponse(request, "backtest.html")
+
+
+@app.get("/welcome", response_class=HTMLResponse)
+def welcome_page(request: Request, key: str = ""):
+    """Post-checkout welcome page showing the subscriber's Pro API key.
+
+    Stripe redirects here after a successful payment (success_url includes
+    ``?key=<api_key>``).  The key is displayed once so the user can copy it;
+    subsequent API requests should send it as the ``X-Api-Key`` header.
+    """
+    return templates.TemplateResponse(
+        request,
+        "welcome.html",
+        context={"api_key": key, "stripe_configured": bool(settings.stripe_secret_key)},
+    )

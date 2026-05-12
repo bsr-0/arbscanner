@@ -128,6 +128,28 @@ ALTER TABLE opportunities ADD COLUMN prediction_origin TEXT;
 ALTER TABLE opportunities ADD COLUMN calibration_json TEXT;
 """
 
+# Migration 5: per-user subscription tracking so Stripe payments grant real
+# Pro tier access rather than relying on the process-wide ARBSCANNER_TIER env
+# var.  Each paying subscriber gets a unique api_key issued at checkout and
+# included in their welcome page; subsequent API calls authenticate via the
+# X-Api-Key request header.
+_MIGRATION_5_SQL = """
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    api_key TEXT UNIQUE NOT NULL,
+    customer_email TEXT,
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    tier TEXT NOT NULL DEFAULT 'pro',
+    created_at TEXT NOT NULL,
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_api_key
+    ON subscriptions(api_key);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_subscription_id
+    ON subscriptions(stripe_subscription_id);
+"""
+
 
 MIGRATIONS: list[Migration] = [
     Migration(
@@ -149,6 +171,11 @@ MIGRATIONS: list[Migration] = [
         version=4,
         description="Add opportunity snapshot fields for titles, predictions, and calibration",
         up_sql=_MIGRATION_4_SQL,
+    ),
+    Migration(
+        version=5,
+        description="Add subscriptions table for per-user Stripe API key gating",
+        up_sql=_MIGRATION_5_SQL,
     ),
 ]
 
