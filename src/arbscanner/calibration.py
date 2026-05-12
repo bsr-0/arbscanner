@@ -551,6 +551,147 @@ def ingest_kalshi_direct(
     return len(df)
 
 
+# Kalshi event-ticker prefix → canonical category.  Sorted longest-first so
+# more-specific prefixes (e.g. KXEURUSD) beat shorter ones (KXEUR).
+_KALSHI_PREFIX_CATEGORIES: list[tuple[str, str]] = sorted(
+    [
+        ("KXBTC", "crypto"),
+        ("KXETH", "crypto"),
+        ("KXSOL", "crypto"),
+        ("KXEURUSD", "economics"),
+        ("KXUSDJPY", "economics"),
+        ("KXGBPUSD", "economics"),
+        ("KXUSDCAD", "economics"),
+        ("KXAUDUSD", "economics"),
+        ("KXINX", "economics"),
+        ("KXNASD", "economics"),
+        ("KXSP5", "economics"),
+        ("KXGOLD", "economics"),
+        ("KXOIL", "economics"),
+        ("KXFED", "economics"),
+        ("KXINFL", "economics"),
+        ("KXUNRATE", "economics"),
+        ("KXGDP", "economics"),
+        ("KXNBA", "sports"),
+        ("KXNFL", "sports"),
+        ("KXMLB", "sports"),
+        ("KXNHL", "sports"),
+        ("KXMLS", "sports"),
+        ("KXPGA", "sports"),
+        ("KXUFC", "sports"),
+        ("KXBOXING", "sports"),
+        ("KXTENNIS", "sports"),
+        ("KXDAVISCUP", "sports"),
+        ("KXFORMULA", "sports"),
+        ("KXNASCAR", "sports"),
+        ("KXCRICKET", "sports"),
+        ("KXRUGBY", "sports"),
+        ("KXOLYMPIC", "sports"),
+        ("KXSPOTIFY", "entertainment"),
+        ("KXNETFLIX", "entertainment"),
+        ("KXOSCAR", "entertainment"),
+        ("KXGRAMMY", "entertainment"),
+        ("KXEMMY", "entertainment"),
+        ("KXACADEMY", "entertainment"),
+        ("KXPRES", "politics"),
+        ("KXGOV", "politics"),
+        ("KXSEN", "politics"),
+        ("KXHOUSE", "politics"),
+        ("KXELECT", "politics"),
+        ("KXUKPOL", "politics"),
+        ("KXHURRICANE", "weather"),
+        ("KXWEATHER", "weather"),
+        ("KXTYPHOON", "weather"),
+    ],
+    key=lambda t: -len(t[0]),  # longest prefix first
+)
+
+
+def _kalshi_event_category(event_ticker: str) -> str:
+    """Derive a canonical category from a Kalshi event ticker.
+
+    Checks structured KX-prefixes first for reliable mapping, then falls
+    back to the general :func:`normalize_category` keyword search.
+    """
+    upper = event_ticker.upper()
+    for prefix, cat in _KALSHI_PREFIX_CATEGORIES:
+        if upper.startswith(prefix):
+            return cat
+    return normalize_category(event_ticker)
+
+
+def ingest_from_becker_dir(data_dir: Path, out_path: Path | None = None) -> int:
+    """Build a calibration dataset from the local Becker prediction-data repo.
+
+    Reads every Parquet file under ``data_dir/kalshi/markets/``, filters to
+    resolved binary markets (non-parlay), and outputs a file with the schema
+    expected by :func:`compute_calibration_curves`.
+
+    Column mapping from Kalshi Becker schema:
+    - ``ticker``       → ``market_id``
+    - ``event_ticker`` → ``category`` (via :func:`normalize_category`)
+    - ``open_time``    → ``created_date``
+    - ``close_time``   → ``resolution_date``
+    - ``last_price``   → ``final_price`` (cents ÷ 100, so 0–1)
+    - ``result``       → ``resolved_yes`` (``"yes"`` → True)
+
+    Args:
+        data_dir: Root of the Becker repo (directory that contains
+                  ``data/kalshi/markets/*.parquet``).
+        out_path: Where to write the output Parquet.  Defaults to
+                  ``<CALIBRATION_DATA_DIR>/historical_becker.parquet``.
+
+    Returns:
+        Number of resolved market rows written.
+
+    Raises:
+        FileNotFoundError: If no Parquet files are found under
+                           ``data_dir/kalshi/markets/``.
+    """
+    out_path = out_path or (CALIBRATION_DATA_DIR / "historical_becker.parquet")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    kalshi_dir = Path(data_dir) / "data" / "kalshi" / "markets"
+    files = sorted(kalshi_dir.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No Parquet files found in {kalshi_dir}")
+
+    logger.info("Reading %d Kalshi market files from %s", len(files), kalshi_dir)
+
+    chunks: list[pd.DataFrame] = []
+    for f in files:
+        df = pd.read_parquet(
+            f,
+            columns=["ticker", "event_ticker", "title", "result", "last_price", "open_time", "close_time"],
+        )
+        resolved = df[
+            df["result"].isin(["yes", "no"])
+            & ~df["ticker"].str.startswith("KXMVE", na=False)
+        ].copy()
+        if resolved.empty:
+            continue
+
+        resolved["category"] = resolved["event_ticker"].apply(_kalshi_event_category)
+        resolved["final_price"] = resolved["last_price"] / 100.0
+        resolved["resolved_yes"] = resolved["result"] == "yes"
+        resolved["exchange"] = "kalshi"
+        resolved = resolved.rename(
+            columns={"ticker": "market_id", "open_time": "created_date", "close_time": "resolution_date"}
+        )
+        chunks.append(
+            resolved[["market_id", "category", "created_date", "resolution_date", "final_price", "resolved_yes", "title", "exchange"]]
+        )
+
+    if not chunks:
+        logger.warning("No resolved markets found in %s", kalshi_dir)
+        return 0
+
+    result = pd.concat(chunks, ignore_index=True)
+    result.to_parquet(out_path)
+    logger.info("Saved %d Becker calibration rows to %s", len(result), out_path)
+    return len(result)
+
+
 def get_historical_edge_stats(db_path: Path | None = None) -> dict:
     """Compute summary stats from logged opportunities in SQLite."""
     path = db_path or DB_PATH

@@ -244,10 +244,33 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     from arbscanner.calibration import (
         compute_calibration_curves,
         get_historical_edge_stats,
+        ingest_from_becker_dir,
         ingest_from_exchange,
         ingest_from_url,
         ingest_kalshi_direct,
     )
+
+    if args.ingest_becker:
+        data_dir = Path(args.ingest_becker)
+        if not data_dir.exists():
+            console.print(f"[red]Directory not found: {data_dir}[/red]")
+            sys.exit(1)
+        console.print(f"[bold]Ingesting Becker calibration data from {data_dir}...[/bold]")
+        try:
+            count = ingest_from_becker_dir(data_dir)
+            console.print(f"[green]Ingested {count:,} resolved markets[/green]")
+        except Exception as e:
+            console.print(f"[red]Ingestion failed: {e}[/red]")
+            sys.exit(1)
+
+        # Auto-compute curves from the freshly ingested data
+        from arbscanner.config import CALIBRATION_DATA_DIR
+        ingested_path = CALIBRATION_DATA_DIR / "historical_becker.parquet"
+        console.print("[bold]Computing calibration curves...[/bold]")
+        curves = compute_calibration_curves(ingested_path)
+        console.print(f"[green]Computed {len(curves)} category×bucket calibration entries[/green]")
+        console.print(curves.to_string(index=False))
+        return
 
     if args.ingest_url:
         console.print(f"[bold]Downloading historical dataset from {args.ingest_url}...[/bold]")
@@ -860,6 +883,11 @@ def main() -> None:
         "--ingest-live",
         action="store_true",
         help="Fetch resolved markets from Polymarket and Kalshi via pmxt",
+    )
+    cal_parser.add_argument(
+        "--ingest-becker",
+        metavar="DATA_DIR",
+        help="Ingest calibration data from a local Becker prediction-data repo directory",
     )
     cal_parser.add_argument(
         "--limit",

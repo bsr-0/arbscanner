@@ -210,3 +210,4 @@ __marimo__/
 data/*
 !data/matched_pairs.json
 arbscanner.db
+becker-prediction-data/
