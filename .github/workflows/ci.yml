@@ -43,15 +43,12 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
-      - name: Install dev extras
-        run: uv pip install -e ".[dev]"
-
       - name: Run ruff
         continue-on-error: true
         run: uv run ruff check src/ tests/
 
       - name: Run pytest
-        run: uv run pytest tests/ -v --tb=short
+        run: uv run python -m pytest tests/ -v --tb=short
 
       - name: Upload test results
         if: failure()
