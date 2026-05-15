@@ -46,6 +46,23 @@ def test_normalize_category():
     assert normalize_category("World Elections") == "politics"
 
 
+def test_normalize_category_no_false_positives():
+    """Short keywords must not match as substrings inside unrelated words."""
+    # "ai" in "rain" → should be other, not science_tech
+    assert normalize_category("kxrainnyc-25nov07") == "other"
+    # "ai" in "paid", "paileg" → should be other, not science_tech
+    assert normalize_category("kxcsgogame-paileg") == "other"
+    # "uk" in "bulk", "duke" → should be other, not politics
+    assert normalize_category("bulk commodity prices") == "other"
+    assert normalize_category("duke basketball") == "sports"
+    # "tv" in "stv" or similar → should not accidentally match
+    assert normalize_category("kxbtv-unknown") == "other"
+    # Positive cases still work after the fix
+    assert normalize_category("AI regulation") == "science_tech"
+    assert normalize_category("UK elections") == "politics"
+    assert normalize_category("Reality TV winner") == "entertainment"
+
+
 def test_get_calibration_context_real_edge():
     """Test calibration context for a large edge in an entertainment market."""
     resolution = datetime.now(timezone.utc) + timedelta(days=45)

@@ -5,6 +5,7 @@ Uses historical prediction market resolution data to compute calibration curves.
 """
 
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -167,8 +168,15 @@ def normalize_category(category: str | None) -> str:
         "climate": "weather",
         "natural disasters": "weather",
     }
+    # Short keys that are common substrings in unrelated words (e.g. "ai" in
+    # "rain", "uk" in "bulk") require whole-word matching.  Longer, unambiguous
+    # keys (e.g. "bitcoin", "weather") stay as fast substring checks.
+    _WORD_BOUNDARY_KEYS = {"ai", "uk", "tv"}
     for key, val in mapping.items():
-        if key in cat:
+        if key in _WORD_BOUNDARY_KEYS:
+            if re.search(r"\b" + re.escape(key) + r"\b", cat):
+                return val
+        elif key in cat:
             return val
     return "other"
 
