@@ -60,7 +60,7 @@ class CalibrationContext:
     category: str
     days_to_resolution: int | None
     time_bucket: str  # "0-7", "7-30", "30-90", "90+"
-    avg_mispricing: float  # historical average mispricing in this bucket (points, 0-100)
+    avg_mispricing: float  # historical median mispricing in this bucket (points, 0-100)
     edge_likely_real: bool  # is the detected edge larger than typical mispricing?
     confidence_note: str  # human-readable explanation
 
@@ -205,14 +205,14 @@ def get_calibration_context(
         note = (
             f"This is a {cat} market "
             f"{'with ' + str(days) + ' days to resolution' if days is not None else '(resolution date unknown)'}. "
-            f"Historically, these are mispriced by ~{avg_mispricing:.1f} points. "
+            f"Historically, the median mispricing is ~{avg_mispricing:.1f} points. "
             f"Your edge of {edge_points:.1f} points exceeds typical mispricing — likely real."
         )
     else:
         note = (
             f"This is a {cat} market "
             f"{'with ' + str(days) + ' days to resolution' if days is not None else '(resolution date unknown)'}. "
-            f"Historically, these are mispriced by ~{avg_mispricing:.1f} points. "
+            f"Historically, the median mispricing is ~{avg_mispricing:.1f} points. "
             f"Your edge of {edge_points:.1f} points is within normal range — may be noise or execution risk."
         )
 
@@ -238,7 +238,7 @@ def _lookup_calibration(category: str, bucket: str) -> float:
             df = pd.read_parquet(cal_path)
             row = df[(df["category"] == category) & (df["time_bucket"] == bucket)]
             if not row.empty:
-                return float(row.iloc[0]["avg_mispricing"])
+                return float(row.iloc[0]["median_mispricing"])
         except Exception:
             logger.debug("Failed to read calibration data, using defaults")
 
@@ -269,6 +269,12 @@ def compute_calibration_curves(data_path: Path) -> pd.DataFrame:
         lambda d: days_to_bucket(int(d)) if pd.notna(d) else "90+"
     )
     df["category"] = df["category"].apply(normalize_category)
+
+    # Drop already-settled prices (final_price snapped to 0 or 1).
+    # These are settlement values, not live trading prices — they carry no
+    # calibration signal and massively skew the mean (ladder markets priced
+    # at 0 cents that resolved YES contribute 100-point "mispricing").
+    df = df[(df["final_price"] > 0.02) & (df["final_price"] < 0.98)]
 
     # For each market, mispricing = |final_price - actual_outcome|
     df["actual"] = df["resolved_yes"].astype(float)
