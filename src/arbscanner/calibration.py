@@ -628,7 +628,14 @@ def ingest_from_polymarket_gamma(
                 },
                 timeout=30,
             )
+            if resp.status_code == 422:
+                # Gamma API caps pagination at ~10,100 results; treat as end
+                logger.info("Reached Gamma API pagination limit at offset %d", offset)
+                break
             resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.exception("HTTP error fetching Gamma API page at offset %d", offset)
+            break
         except Exception:
             logger.exception("Error fetching Gamma API page at offset %d", offset)
             break
