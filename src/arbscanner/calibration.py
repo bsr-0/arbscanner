@@ -234,10 +234,19 @@ def get_calibration_context(
     )
 
 
+# Minimum number of mid-market observations required to trust a calibration
+# bucket.  Buckets below this threshold fall back to DEFAULT_PROFILES so that
+# thin / noisy cells (e.g. science_tech 7-30 with 23 rows and median=50)
+# don't produce misleading "edge is noise" verdicts.
+_MIN_CALIBRATION_COUNT = 50
+
+
 def _lookup_calibration(category: str, bucket: str) -> float:
     """Look up calibration mispricing for a category/bucket.
 
     Tries computed data first, falls back to defaults.
+    Buckets with fewer than _MIN_CALIBRATION_COUNT observations are treated as
+    unreliable and fall back to DEFAULT_PROFILES.
     """
     # Try loading from computed calibration file
     cal_path = CALIBRATION_DATA_DIR / "calibration_curves.parquet"
@@ -245,7 +254,7 @@ def _lookup_calibration(category: str, bucket: str) -> float:
         try:
             df = pd.read_parquet(cal_path)
             row = df[(df["category"] == category) & (df["time_bucket"] == bucket)]
-            if not row.empty:
+            if not row.empty and int(row.iloc[0]["count"]) >= _MIN_CALIBRATION_COUNT:
                 return float(row.iloc[0]["median_mispricing"])
         except Exception:
             logger.debug("Failed to read calibration data, using defaults")
@@ -704,6 +713,60 @@ def ingest_from_becker_dir(data_dir: Path, out_path: Path | None = None) -> int:
     result.to_parquet(out_path)
     logger.info("Saved %d Becker calibration rows to %s", len(result), out_path)
     return len(result)
+
+
+def merge_historical_sources(out_path: Path | None = None) -> int:
+    """Merge all ingested historical source files into one deduplicated dataset.
+
+    Concatenates historical_kalshi.parquet, historical_becker.parquet, and
+    historical_polymarket.parquet (whichever exist), deduplicates on market_id
+    keeping the first occurrence, and writes the result to
+    historical_merged.parquet.
+
+    Kalshi API data is listed first so it takes precedence over the Becker
+    dataset for overlapping market IDs (the API version is more recent).
+
+    Returns:
+        Total number of rows in the merged file.
+    """
+    sources = [
+        CALIBRATION_DATA_DIR / "historical_kalshi.parquet",
+        CALIBRATION_DATA_DIR / "historical_becker.parquet",
+        CALIBRATION_DATA_DIR / "historical_polymarket.parquet",
+    ]
+    frames = []
+    for p in sources:
+        if p.exists():
+            df = pd.read_parquet(p)
+            frames.append(df)
+            logger.info("Loaded %d rows from %s", len(df), p.name)
+        else:
+            logger.debug("Source not found, skipping: %s", p.name)
+
+    if not frames:
+        logger.warning("No historical source files found in %s", CALIBRATION_DATA_DIR)
+        return 0
+
+    combined = pd.concat(frames, ignore_index=True)
+    before = len(combined)
+
+    # When the same market_id appears in multiple sources, prefer the row with
+    # a mid-market price (0.02–0.98) over a settled price (0 or 1), since
+    # settled prices carry no calibration signal.  Within each group, sort
+    # mid-market rows first, then keep the first occurrence.
+    combined["_is_mid"] = (combined["final_price"] > 0.02) & (combined["final_price"] < 0.98)
+    combined = (
+        combined
+        .sort_values("_is_mid", ascending=False)
+        .drop_duplicates(subset=["market_id"], keep="first")
+        .drop(columns=["_is_mid"])
+    )
+    logger.info("Merged %d rows → %d after deduplication", before, len(combined))
+
+    out_path = out_path or (CALIBRATION_DATA_DIR / "historical_merged.parquet")
+    combined.to_parquet(out_path)
+    logger.info("Saved merged dataset to %s", out_path)
+    return len(combined)
 
 
 def get_historical_edge_stats(db_path: Path | None = None) -> dict:

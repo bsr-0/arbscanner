@@ -248,7 +248,23 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         ingest_from_exchange,
         ingest_from_url,
         ingest_kalshi_direct,
+        merge_historical_sources,
     )
+
+    if args.merge:
+        from arbscanner.config import CALIBRATION_DATA_DIR
+        console.print("[bold]Merging historical source files...[/bold]")
+        count = merge_historical_sources()
+        if count == 0:
+            console.print("[yellow]No source files found to merge.[/yellow]")
+            return
+        console.print(f"[green]Merged dataset: {count:,} rows[/green]")
+        merged_path = CALIBRATION_DATA_DIR / "historical_merged.parquet"
+        console.print("[bold]Recomputing calibration curves from merged dataset...[/bold]")
+        curves = compute_calibration_curves(merged_path)
+        console.print(f"[green]Computed {len(curves)} category×bucket entries[/green]")
+        console.print(curves.to_string(index=False))
+        return
 
     if args.ingest_becker:
         data_dir = Path(args.ingest_becker)
@@ -888,6 +904,11 @@ def main() -> None:
         "--ingest-becker",
         metavar="DATA_DIR",
         help="Ingest calibration data from a local Becker prediction-data repo directory",
+    )
+    cal_parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Merge all ingested historical sources and recompute calibration curves",
     )
     cal_parser.add_argument(
         "--limit",
