@@ -246,6 +246,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         get_historical_edge_stats,
         ingest_from_becker_dir,
         ingest_from_exchange,
+        ingest_from_polymarket_becker_trades,
         ingest_from_polymarket_gamma,
         ingest_from_url,
         ingest_kalshi_direct,
@@ -265,6 +266,23 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         curves = compute_calibration_curves(merged_path)
         console.print(f"[green]Computed {len(curves)} category×bucket entries[/green]")
         console.print(curves.to_string(index=False))
+        return
+
+    if args.ingest_becker_pm:
+        data_dir = Path(args.ingest_becker_pm)
+        if not data_dir.exists():
+            console.print(f"[red]Directory not found: {data_dir}[/red]")
+            sys.exit(1)
+        console.print(
+            f"[bold]Ingesting Becker Polymarket trades from {data_dir}...[/bold]\n"
+            "[yellow]This scans ~40K parquet files and may take 20-60 minutes.[/yellow]"
+        )
+        try:
+            count = ingest_from_polymarket_becker_trades(data_dir)
+            console.print(f"[green]Saved {count:,} Polymarket rows[/green]")
+        except Exception as e:
+            console.print(f"[red]Ingestion failed: {e}[/red]")
+            sys.exit(1)
         return
 
     if args.ingest_becker:
@@ -911,6 +929,11 @@ def main() -> None:
         "--merge",
         action="store_true",
         help="Merge all ingested historical sources and recompute calibration curves",
+    )
+    cal_parser.add_argument(
+        "--ingest-becker-pm",
+        metavar="DATA_DIR",
+        help="Ingest Polymarket calibration data from Becker trades via DuckDB (long-running)",
     )
     cal_parser.add_argument(
         "--limit",

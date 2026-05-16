@@ -724,6 +724,171 @@ def ingest_from_polymarket_gamma(
     return len(new_df)
 
 
+def ingest_from_polymarket_becker_trades(
+    becker_dir: Path,
+    out_path: Path | None = None,
+) -> int:
+    """Build a Polymarket calibration dataset from the Becker trades dataset.
+
+    Uses DuckDB to join the Becker ``data/polymarket/`` tables:
+    - markets/*.parquet  — condition_id, clob_token_ids, outcome_prices, end_date
+    - trades/*.parquet   — block_number, maker/taker asset IDs and amounts
+    - blocks/*.parquet   — block_number → timestamp
+
+    For each resolved binary market, finds the last YES-token trade before
+    ``end_date`` and computes the implied YES price.  Only mid-market prices
+    (0.02–0.98) are kept, consistent with the filter in
+    ``compute_calibration_curves``.
+
+    This is a long-running operation (tens of minutes) due to the scale of
+    the trade dataset (~40K parquet files).  Run it once and the output is
+    cached to ``out_path``.
+
+    Args:
+        becker_dir: Root of the local Becker repo (contains ``data/polymarket/``).
+        out_path: Where to write the output Parquet.  Defaults to
+                  ``<CALIBRATION_DATA_DIR>/historical_polymarket_becker.parquet``.
+
+    Returns:
+        Number of rows written.
+    """
+    try:
+        import duckdb
+    except ImportError:
+        logger.error("duckdb is required: run 'uv add duckdb'")
+        return 0
+
+    becker_dir = Path(becker_dir)
+    pm_dir = becker_dir / "data" / "polymarket"
+    markets_glob = str(pm_dir / "markets" / "*.parquet")
+    trades_glob = str(pm_dir / "trades" / "*.parquet")
+    blocks_glob = str(pm_dir / "blocks" / "*.parquet")
+
+    for g in [markets_glob, trades_glob, blocks_glob]:
+        import glob as _glob
+        if not _glob.glob(g):
+            raise FileNotFoundError(f"No files matched: {g}")
+
+    out_path = out_path or (CALIBRATION_DATA_DIR / "historical_polymarket_becker.parquet")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Starting DuckDB Becker Polymarket trades join (this may take 20-60 min)")
+
+    con = duckdb.connect()
+    # Use all available threads for parallel parquet scanning
+    con.execute("SET threads TO 8")
+    con.execute("SET memory_limit = '4GB'")
+
+    # Build a view of resolved binary markets with YES token and outcome
+    con.execute(f"""
+        CREATE OR REPLACE VIEW markets_resolved AS
+        SELECT
+            condition_id,
+            question,
+            created_at,
+            end_date,
+            -- YES token is the first element of the clob_token_ids JSON array
+            json_extract_string(clob_token_ids, '$[0]') AS yes_token,
+            -- resolved_yes: outcome_prices[0] = '1' means YES won
+            (json_extract_string(outcome_prices, '$[0]') = '1') AS resolved_yes
+        FROM read_parquet('{markets_glob}')
+        WHERE closed = true
+          AND json_extract_string(clob_token_ids, '$[0]') IS NOT NULL
+          -- Both prices must be 0 or 1 (i.e. definitively resolved)
+          AND json_extract_string(outcome_prices, '$[0]') IN ('0', '1')
+          AND json_extract_string(outcome_prices, '$[1]') IN ('0', '1')
+          -- At least one side must have won
+          AND json_extract_string(outcome_prices, '$[0]')
+              != json_extract_string(outcome_prices, '$[1]')
+    """)
+
+    n_markets = con.execute("SELECT COUNT(*) FROM markets_resolved").fetchone()[0]
+    logger.info("Resolved binary markets: %d", n_markets)
+
+    # Build a view of YES-token trades with timestamps from the blocks join.
+    # A YES-token trade is any trade where one side is USDC (asset_id='0') and
+    # the other is an outcome token.  Price = USDC_amount / token_amount.
+    con.execute(f"""
+        CREATE OR REPLACE VIEW yes_token_trades AS
+        SELECT
+            CASE
+                WHEN t.maker_asset_id = '0' THEN t.taker_asset_id
+                ELSE t.maker_asset_id
+            END AS token_id,
+            CASE
+                WHEN t.maker_asset_id = '0'
+                    THEN t.maker_amount::DOUBLE / NULLIF(t.taker_amount::DOUBLE, 0)
+                ELSE t.taker_amount::DOUBLE / NULLIF(t.maker_amount::DOUBLE, 0)
+            END AS price_usdc_per_token,
+            strptime(b.timestamp, '%Y-%m-%dT%H:%M:%SZ') AS trade_time
+        FROM read_parquet('{trades_glob}') t
+        JOIN read_parquet('{blocks_glob}') b ON t.block_number = b.block_number
+        -- Only USDC-for-token swaps (exclude token-for-token trades)
+        WHERE (t.maker_asset_id = '0') != (t.taker_asset_id = '0')
+          AND t.maker_amount > 0
+          AND t.taker_amount > 0
+    """)
+
+    logger.info("Running main join (scanning ~40K trade files)...")
+
+    result = con.execute("""
+        WITH last_trade AS (
+            SELECT
+                m.condition_id,
+                m.question,
+                m.created_at,
+                m.end_date,
+                m.resolved_yes,
+                t.price_usdc_per_token AS final_price,
+                t.trade_time,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.condition_id
+                    ORDER BY t.trade_time DESC
+                ) AS rn
+            FROM markets_resolved m
+            JOIN yes_token_trades t ON t.token_id = m.yes_token
+            WHERE t.trade_time < m.end_date
+              -- Only keep mid-market prices (pre-settlement signal)
+              AND t.price_usdc_per_token > 0.02
+              AND t.price_usdc_per_token < 0.98
+        )
+        SELECT
+            condition_id AS market_id,
+            question AS title,
+            created_at AS created_date,
+            end_date   AS resolution_date,
+            final_price,
+            resolved_yes
+        FROM last_trade
+        WHERE rn = 1
+    """).df()
+
+    con.close()
+
+    if result.empty:
+        logger.warning("DuckDB join returned no rows")
+        return 0
+
+    result["category"] = result["title"].apply(normalize_category)
+    result["exchange"] = "polymarket"
+
+    # Append-and-deduplicate against existing file
+    if out_path.exists():
+        existing = pd.read_parquet(out_path)
+        if not existing.empty and "market_id" in existing.columns:
+            existing_ids = set(existing["market_id"].values)
+            new_only = result[~result["market_id"].isin(existing_ids)]
+            logger.info(
+                "Appending %d new Becker PM rows to %d existing",
+                len(new_only), len(existing),
+            )
+            result = pd.concat([existing, new_only], ignore_index=True)
+
+    result.to_parquet(out_path)
+    logger.info("Saved %d Becker Polymarket rows to %s", len(result), out_path)
+    return len(result)
+
+
 # Kalshi event-ticker prefix → canonical category.  Sorted longest-first so
 # more-specific prefixes (e.g. KXEURUSD) beat shorter ones (KXEUR).
 _KALSHI_PREFIX_CATEGORIES: list[tuple[str, str]] = sorted(
