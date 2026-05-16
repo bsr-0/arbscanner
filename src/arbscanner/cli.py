@@ -246,6 +246,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         get_historical_edge_stats,
         ingest_from_becker_dir,
         ingest_from_exchange,
+        ingest_from_polymarket_gamma,
         ingest_from_url,
         ingest_kalshi_direct,
         merge_historical_sources,
@@ -300,13 +301,14 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
 
     if args.ingest_live:
         console.print("[bold]Fetching resolved markets from both exchanges...[/bold]")
-        poly, _kalshi = create_exchanges()
-        poly_count = ingest_from_exchange(poly, "Polymarket", limit=args.limit)
-        # Use direct Kalshi API instead of pmxt (pmxt ignores status field)
+        # Polymarket: use Gamma API + pmxt ohlcv for pre-settlement prices
+        days_back = args.days_back or 7
+        console.print(f"[dim]Polymarket Gamma: last {days_back} days[/dim]")
+        poly_count = ingest_from_polymarket_gamma(days_back=days_back)
+        console.print(f"[green]Polymarket: {poly_count} total rows[/green]")
+        # Kalshi: direct API (pmxt ignores status field)
         kalshi_count = ingest_kalshi_direct(limit=args.limit)
-        console.print(
-            f"[green]Ingested {poly_count} Polymarket + {kalshi_count} Kalshi resolved markets[/green]"
-        )
+        console.print(f"[green]Kalshi: {kalshi_count} total rows[/green]")
         return
 
     if args.data_file:
@@ -914,7 +916,13 @@ def main() -> None:
         "--limit",
         type=int,
         default=None,
-        help="Max resolved markets to fetch per exchange (for --ingest-live)",
+        help="Max resolved markets to fetch per exchange (for --ingest-live Kalshi)",
+    )
+    cal_parser.add_argument(
+        "--days-back",
+        type=int,
+        default=7,
+        help="How many days back to scan for closed Polymarket markets (for --ingest-live, default 7)",
     )
 
     # paper command

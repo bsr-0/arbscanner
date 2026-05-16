@@ -574,6 +574,156 @@ def ingest_kalshi_direct(
     return len(df)
 
 
+_GAMMA_API_BASE = "https://gamma-api.polymarket.com"
+_GAMMA_PAGE_SIZE = 100
+
+
+def ingest_from_polymarket_gamma(
+    days_back: int = 7,
+    out_path: Path | None = None,
+) -> int:
+    """Ingest recently resolved Polymarket markets via the Gamma API.
+
+    For each closed market, fetches the last daily OHLCV candle via pmxt to
+    get the pre-settlement trading price.  Markets where the last candle price
+    is already settled (< 0.02 or > 0.98) are skipped — they carry no
+    calibration signal, consistent with the filter in compute_calibration_curves.
+
+    Args:
+        days_back: How many days back from now to scan for closed markets.
+        out_path: Where to write/append the output Parquet.  Defaults to
+                  ``<CALIBRATION_DATA_DIR>/historical_polymarket.parquet``.
+
+    Returns:
+        Total number of rows in the output file after appending new data.
+    """
+    import json
+    import time
+
+    try:
+        import pmxt
+        pm = pmxt.Polymarket()
+    except Exception as exc:
+        logger.error("pmxt unavailable: %s", exc)
+        return 0
+
+    out_path = out_path or (CALIBRATION_DATA_DIR / "historical_polymarket.parquet")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days_back)
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    stopped_early = False
+
+    while True:
+        try:
+            resp = httpx.get(
+                f"{_GAMMA_API_BASE}/markets",
+                params={
+                    "closed": "true",
+                    "limit": _GAMMA_PAGE_SIZE,
+                    "offset": offset,
+                    "order": "closedTime",
+                    "ascending": "false",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except Exception:
+            logger.exception("Error fetching Gamma API page at offset %d", offset)
+            break
+
+        markets = resp.json()
+        if not markets:
+            break
+
+        for m in markets:
+            closed_time = pd.to_datetime(m.get("closedTime"), utc=True, errors="coerce")
+            if pd.isna(closed_time) or closed_time < cutoff:
+                stopped_early = True
+                break
+
+            # Skip multi-outcome negRisk markets
+            if m.get("negRisk"):
+                continue
+
+            condition_id = m.get("conditionId", "")
+            if not condition_id:
+                continue
+
+            # Parse resolved_yes from outcomePrices — first element is YES price
+            try:
+                outcome_prices = json.loads(m.get("outcomePrices", "[]"))
+                resolved_yes = float(outcome_prices[0]) > 0.5
+            except (ValueError, IndexError, TypeError):
+                continue
+
+            # Get YES token ID for OHLCV lookup
+            try:
+                clob_token_ids = json.loads(m.get("clobTokenIds", "[]"))
+                yes_token_id = str(clob_token_ids[0])
+            except (ValueError, IndexError, TypeError):
+                continue
+
+            # Fetch last daily candles and find the most recent mid-market close
+            final_price = None
+            try:
+                candles = pm.fetch_ohlcv(yes_token_id, resolution="1d", limit=5)
+                for candle in reversed(candles):
+                    price = float(candle.close)
+                    if 0.02 < price < 0.98:
+                        final_price = price
+                        break
+            except Exception:
+                pass  # ohlcv unavailable for this market — skip
+
+            if final_price is None:
+                continue
+
+            question = m.get("question", "")
+            rows.append({
+                "market_id": condition_id,
+                "category": normalize_category(question),
+                "created_date": pd.to_datetime(m.get("startDate"), utc=True, errors="coerce"),
+                "resolution_date": pd.to_datetime(m.get("endDate"), utc=True, errors="coerce"),
+                "final_price": final_price,
+                "resolved_yes": resolved_yes,
+                "title": question,
+                "exchange": "polymarket",
+            })
+
+        logger.info(
+            "Gamma page offset=%d: %d markets, %d rows collected so far",
+            offset, len(markets), len(rows),
+        )
+
+        if stopped_early or len(markets) < _GAMMA_PAGE_SIZE:
+            break
+
+        offset += _GAMMA_PAGE_SIZE
+        time.sleep(0.2)  # polite rate limit
+
+    new_df = pd.DataFrame(rows)
+    if new_df.empty:
+        logger.warning("No new Polymarket rows collected from Gamma API")
+        return 0
+
+    # Append-and-deduplicate
+    if out_path.exists():
+        existing = pd.read_parquet(out_path)
+        if not existing.empty and "market_id" in existing.columns:
+            existing_ids = set(existing["market_id"].values)
+            new_only = new_df[~new_df["market_id"].isin(existing_ids)]
+            logger.info(
+                "Appending %d new Polymarket markets to %d existing", len(new_only), len(existing)
+            )
+            new_df = pd.concat([existing, new_only], ignore_index=True)
+
+    new_df.to_parquet(out_path)
+    logger.info("Saved %d Polymarket rows to %s", len(new_df), out_path)
+    return len(new_df)
+
+
 # Kalshi event-ticker prefix → canonical category.  Sorted longest-first so
 # more-specific prefixes (e.g. KXEURUSD) beat shorter ones (KXEUR).
 _KALSHI_PREFIX_CATEGORIES: list[tuple[str, str]] = sorted(
